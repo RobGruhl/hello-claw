@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+workspace/
+data/
+*.log
+.DS_Store
+*.zip
+config.env
+hello-claw-state-*.tar.gz
+slack-post.md

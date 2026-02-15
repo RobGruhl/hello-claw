@@ -1,0 +1,40 @@
+{
+  "name": "hello-claw",
+  "version": "1.0.0",
+  "description": "A Slack-connected autonomous agent built on the Claude Agent SDK with in-process MCP servers, OS-level sandboxing, and human-in-the-loop approval workflows",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RobGruhl/hello-claw.git"
+  },
+  "keywords": [
+    "claude",
+    "agent",
+    "slack",
+    "mcp",
+    "autonomous-agent",
+    "claude-agent-sdk"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "private": false,
+  "scripts": {
+    "dev": "tsx src/host.ts",
+    "build": "tsc",
+    "start": "node dist/host.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.42",
+    "@slack/bolt": "^4.1.0",
+    "cron-parser": "^5.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}
