@@ -84,7 +84,6 @@ bootstrap/
     deploy.md             # /deploy: hot-deploy to Mac Mini
     initialize.md         # /initialize: first-run workspace setup
 docs/                   # Reference documentation
-  security-audit.md     # Living security audit with open findings and remediation log
   capabilities/         # Per-MCP capability specs following 4-layer stack pattern
     design-standards.md # Capability stack design standards
     slack.md, cron.md, media.md, search.md, second-brain.md, github.md, voice.md, audio.md

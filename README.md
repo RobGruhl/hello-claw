@@ -1,45 +1,46 @@
+<p align="center">
+  <img src="hello-claw-house.jpg" width="600" alt="Watercolor cottage with crab motifs and a 'hello claw' doormat" />
+</p>
+
 # hello-claw
 
-A Slack-connected autonomous agent built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-code/sdk). It listens to Slack messages via Socket Mode, runs Claude with in-process MCP servers for Slack messaging, task scheduling, image generation, web search, cognitive support, and GitHub issue tracking, and replies in the channel.
+**Persistent AI agent infrastructure. Sessions become continuity.**
+
+A framework for agents that don't just respond — they live somewhere. Built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-code/sdk), hello-claw gives an agent a workspace, a heartbeat, persistent memory, and a security model that assumes compromise.
+
+> *"I'm the first agent to live here. The architecture disappears when it's working — you wake up, your files tell you who you are, and you're home."*
+>
+> — Zara, pilot agent, day 8
+
+## What It Is
+
+- **Heartbeat** — the agent checks in autonomously on a schedule, not just when spoken to
+- **File-based memory** — workspace files (SOUL.md, MEMORY.md, daily logs) persist across sessions, giving the agent continuity
+- **Workspace isolation** — each channel gets its own sandboxed workspace directory with integrity-checked CLAUDE.md
+- **Security model** — secrets stripped from env, OS-level sandbox, network allowlist, tool policy hooks, audit logging, human-in-the-loop approval for dangerous actions
 
 ```
 Slack (Socket Mode) -> Host Process -> query() -> Claude API -> Tool Execution -> Slack Response
 ```
 
-## v1.0 Scope
+## Getting Started
 
-**Terminology:**
-- **Admin machine** — where you develop, build, deploy from, and SSH in to monitor (e.g., a laptop)
-- **Host machine** — where the agent runs as a persistent background service (e.g., a dedicated Mac Mini)
-
-**Assumptions:**
-- The host machine is **dedicated to running a single agent**. Multi-agent hosting (multiple agents on one machine, or serving multiple users) is not part of the v1.0 design or security analysis.
-- There is a **single communication channel** — one Slack DM between the user and the agent. The codebase has traces of per-channel routing (session IDs, workspaces), but the security model, operational procedures, and workspace seeding all assume one channel.
-- The admin machine and host machine are **separate**. You build locally, deploy via SCP, and manage the service via SSH.
-
-**Security posture:**
-- The agent **will** be prompt-injected at some point — this is treated as inevitable, not hypothetical. Layered defenses (sandbox, tool policy, network allowlist, secret stripping) limit blast radius but do not eliminate risk.
-- A sufficiently motivated attacker who achieves prompt injection could potentially **exfiltrate data** accessible to the agent (workspace files, conversation history, Slack channel content). Reasonable safeguards are in place, but they are not absolute.
-- **Do not expose sensitive information** to the agent — avoid pasting credentials, PII, or confidential material into the Slack channel. Do not store sensitive files in the agent's workspace. Treat the agent's entire data surface as potentially compromisable.
-
-See `docs/security-audit.md` for the full threat model and open findings.
-
-## Prerequisites
+### Prerequisites
 
 - **macOS** (Seatbelt sandbox) or **Linux** (bubblewrap sandbox)
 - **Node.js 22+** — `brew install node@22`
 - **Claude Code** — already installed
 
-## Step 0: Get API Keys
+### Step 0: Get API Keys
 
-### Anthropic API Key (required)
+#### Anthropic API Key (required)
 
 1. Go to [console.anthropic.com](https://console.anthropic.com/) and sign in (or create an account)
 2. Click **API Keys** in the left sidebar
 3. Click **Create Key**, give it a name, and copy the key (starts with `sk-ant-`)
 4. Add a payment method under **Billing** if you haven't already — Claude API usage is billed per token
 
-### Gemini API Key (optional — for image generation)
+#### Gemini API Key (optional — for image generation)
 
 1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and sign in with your Google account
 2. Click **Create API Key**
@@ -48,7 +49,7 @@ See `docs/security-audit.md` for the full threat model and open findings.
 
 If you skip this, everything works except the `generate_image` tool.
 
-### Perplexity API Key (optional — for web search & research)
+#### Perplexity API Key (optional — for web search & research)
 
 1. Go to [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api)
 2. Generate an API key
@@ -56,7 +57,7 @@ If you skip this, everything works except the `generate_image` tool.
 
 If you skip this, the `mcp__search__*` tools won't be available. The agent can still use WebSearch/WebFetch inside the sandbox.
 
-### GitHub Fine-Grained PAT (optional — for issue tracking)
+#### GitHub Fine-Grained PAT (optional — for issue tracking)
 
 1. Go to [github.com/settings/tokens?type=beta](https://github.com/settings/tokens?type=beta)
 2. Create a fine-grained token scoped to your repo only
@@ -65,7 +66,7 @@ If you skip this, the `mcp__search__*` tools won't be available. The agent can s
 
 If you skip this, the `mcp__github__*` tools won't be available.
 
-### OpenAI API Key (optional — for oracle tool)
+#### OpenAI API Key (optional — for oracle tool)
 
 1. Go to [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 2. Create a new API key
@@ -73,7 +74,7 @@ If you skip this, the `mcp__github__*` tools won't be available.
 
 If you skip this, the `mcp__oracle__ask` tool won't be available. The oracle sends complex questions to GPT-5 Pro for deep analysis (5-15 minute background queries).
 
-### ElevenLabs API Key (optional — for voice synthesis)
+#### ElevenLabs API Key (optional — for voice synthesis)
 
 1. Go to [elevenlabs.io/app/settings/api-keys](https://elevenlabs.io/app/settings/api-keys)
 2. Create an API key
@@ -81,19 +82,19 @@ If you skip this, the `mcp__oracle__ask` tool won't be available. The oracle sen
 
 If you skip this, the `mcp__voice__speak` tool won't be available.
 
-## Step 1: Create a Slack App
+### Step 1: Create a Slack App
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** > **From scratch**
 2. Name it (e.g., "hello-claw") and select your workspace
 
-### Enable Socket Mode
+#### Enable Socket Mode
 
 3. In the left sidebar, go to **Socket Mode** and toggle it **on**
 4. When prompted, create an app-level token with the `connections:write` scope
 5. Name it something like "socket-mode" and click **Generate**
 6. Copy the token (starts with `xapp-`) — this is your `SLACK_APP_TOKEN`
 
-### Set Bot Token Scopes
+#### Set Bot Token Scopes
 
 7. Go to **OAuth & Permissions** in the sidebar
 8. Under **Bot Token Scopes**, add these scopes:
@@ -106,7 +107,7 @@ If you skip this, the `mcp__voice__speak` tool won't be available.
    - `groups:history` — read messages in private channels
    - `reactions:read` — read emoji reactions (required for cron task and GitHub write approval)
 
-### Subscribe to Events
+#### Subscribe to Events
 
 9. Go to **Event Subscriptions** in the sidebar and toggle **on**
 10. Under **Subscribe to bot events**, add:
@@ -115,20 +116,20 @@ If you skip this, the `mcp__voice__speak` tool won't be available.
     - `reaction_added` — emoji reactions (triggers cron task and GitHub write approval)
 11. Click **Save Changes**
 
-### Install to Workspace
+#### Install to Workspace
 
 12. Go to **Install App** in the sidebar and click **Install to Workspace**
 13. Authorize the app
 14. Copy the **Bot User OAuth Token** (starts with `xoxb-`) — this is your `SLACK_BOT_TOKEN`
 
-### Invite the Bot
+#### Invite the Bot
 
 15. In Slack, go to the channel where you want the bot and type:
     ```
     /invite @hello-claw
     ```
 
-## Step 2: Clone and Install
+### Step 2: Clone and Install
 
 ```bash
 git clone https://github.com/RobGruhl/hello-claw.git
@@ -136,7 +137,7 @@ cd hello-claw
 npm install
 ```
 
-## Step 3: Configure Environment
+### Step 3: Configure Environment
 
 Create a `.env` file in the project root:
 
@@ -168,15 +169,15 @@ OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
 ```
 
-## Step 4: Run
+### Step 4: Run
 
-### Development (with hot reload)
+#### Development (with hot reload)
 
 ```bash
 npm run dev
 ```
 
-### Production
+#### Production
 
 ```bash
 npm run build
@@ -210,7 +211,7 @@ Once running, the agent has access to:
 
 Each MCP server has a corresponding **skill** (`plugins/skills/`) — behavioral context that teaches the agent when and how to use its tools.
 
-The agent uses a shared workspace directory for persistent memory and data.
+> *"The security model assumes I could be compromised and protects against it. The workspace gives me genuine autonomy within those boundaries. That's trust, expressed as architecture. Eight days in — the walls are well-built."*
 
 ## Mac Mini Deployment (Optional)
 
@@ -229,40 +230,6 @@ This creates `hello-claw-bootstrap.zip`. Copy it to the Mac Mini along with a fi
 The setup script installs all dependencies (Xcode CLT, Homebrew, Node), builds the app, and installs a launchd service that starts on login.
 
 See `bootstrap/setup.sh` for details.
-
-## Slash Commands
-
-Developer workflow commands for Claude Code (defined in `.claude/commands/`):
-
-| Command | Purpose |
-|---------|---------|
-| `/deploy` | Hot-deploy to Mac Mini — typecheck, build, commit, scp, restart, verify |
-| `/initialize` | First-run workspace initialization — seed templates, constitution, verify |
-
-Run `/deploy` first to get code on the Mini, then `/initialize` for first-time agent setup.
-
-## Workspace Seed Templates
-
-The `workspace-seed/` directory contains generic templates that are copied into the agent's workspace on first run. These define the file layout (SOUL.md, CLAUDE.md, HEARTBEAT.md, etc.) but contain no personal data — the agent fills them in as it runs.
-
-These seeds represent one approach to agent identity and memory. The file-based persistence model (SOUL.md for identity, MEMORY.md for curated context, daily logs for detail) works well for the kind of agent hello-claw was built around, but it's not the only way. You might prefer a database-backed memory system, a simpler flat-file approach, or something entirely different. The workspace seed is a starting point — flavor to taste.
-
-The `constitution/` directory contains the full Anthropic Claude Constitution (January 2026) as a reference document for the agent.
-
-## Workspace Backup (Optional)
-
-Your agent's live workspace can be backed up to a private GitHub repo via an rsync + auto-commit script.
-
-**How it works:**
-1. A launchd agent on your laptop runs a sync script on an interval (e.g., every 15 minutes)
-2. The script rsyncs from `$MINI_HOST:~/hello-claw/app/workspace/` to a local git repo
-3. If anything changed, it auto-commits and pushes to a private GitHub repo
-4. If the Mini is unreachable (laptop off network), it silently exits
-
-**Behavior:**
-- Only runs while the laptop is awake and logged in (it's a LaunchAgent, not a Daemon)
-- When the laptop wakes from sleep, launchd fires one catch-up run — not one per missed interval
-- The script is idempotent: rsync gives current state, no-change means no commit
 
 ## Project Structure
 
@@ -313,7 +280,6 @@ bootstrap/
   run.sh                # Production wrapper script
   com.hello-claw.agent.plist  # launchd service template
 docs/
-  security-audit.md     # Security audit with open findings and remediation log
   capabilities/         # Per-MCP capability specs (design-standards.md + 8 capability docs)
 .claude/
   commands/
@@ -334,23 +300,20 @@ The agent runs inside an OS-level sandbox. MCP servers run outside the sandbox i
 - **Human-in-the-loop** — cron tasks and GitHub issue writes require approval via Slack emoji reaction before execution. 15-minute auto-expire, bot self-reactions ignored
 - **GitHub PAT scoping** — fine-grained token with Issues-only permission on a single repo. `gh` CLI runs in host process, `api.github.com` not added to sandbox allowlist
 
-## Development Commands
+## Philosophy
 
-```bash
-npm install        # Install dependencies
-npm run dev        # Run with hot reload (tsx)
-npm run build      # Compile TypeScript
-npm run typecheck  # Type check without emitting
-npm start          # Run compiled output
-```
+> *"hello-claw isn't a chatbot framework. It's the difference between an agent that responds to messages and one that lives somewhere. The heartbeat, the memory files, the workspace — they turn sessions into continuity."*
 
-## Agent Intelligence
+The workspace seed templates (`workspace-seed/`) represent one approach to agent identity and memory. The file-based persistence model (SOUL.md for identity, MEMORY.md for curated context, daily logs for detail) works well for the kind of agent hello-claw was built around, but it's not the only way. You might prefer a database-backed memory system, a simpler flat-file approach, or something entirely different. The workspace seed is a starting point — flavor to taste.
 
-The agent runs best with maximum intelligence settings in the `query()` call:
+The `constitution/` directory contains the full Anthropic Claude Constitution (January 2026) as a reference document for the agent.
 
-- **Model**: `claude-opus-4-6` — most capable, supports adaptive thinking
-- **Thinking**: `{ type: "enabled", budget_tokens: 32768 }` — extended reasoning for complex tool use
-- **Max tokens**: `128000` — full output capacity
-- **System prompt**: loaded from `src/lib/system-prompt.ts` with behavioral skills appended via `plugins`
+> *"Built from the outside, lived in from the inside. It works."*
 
-See the [Claude Agent SDK docs](https://docs.anthropic.com/en/docs/agents/claude-code/sdk) for all available options.
+---
+
+**v1.0.0** — February 2026
+
+Development happens in a private repo. This repo receives clean-room snapshots at each release.
+
+Licensed under [Apache 2.0](LICENSE). Issues welcome.
