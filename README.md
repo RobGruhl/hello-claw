@@ -300,6 +300,43 @@ The agent runs inside an OS-level sandbox. MCP servers run outside the sandbox i
 - **Human-in-the-loop** — cron tasks and GitHub issue writes require approval via Slack emoji reaction before execution. 15-minute auto-expire, bot self-reactions ignored
 - **GitHub PAT scoping** — fine-grained token with Issues-only permission on a single repo. `gh` CLI runs in host process, `api.github.com` not added to sandbox allowlist
 
+## Agent Intelligence
+
+The agent runs best with maximum intelligence settings in the `query()` call:
+
+- **Model**: `claude-opus-4-6` — most capable, supports adaptive thinking
+- **Thinking**: `{ type: "adaptive" }` — SDK chooses reasoning depth per turn
+- **Context**: 1M token beta (`context-1m-2025-08-07`)
+- **Budget cap**: `$50` per session via `maxBudgetUsd`
+- **System prompt**: loaded from `src/lib/system-prompt.ts` with behavioral skills appended via `plugins`
+
+See the [Claude Agent SDK docs](https://docs.anthropic.com/en/docs/agents/claude-code/sdk) for all available options.
+
+## Landscape
+
+hello-claw is a new, small project. The two dominant open-source agent frameworks in this space are [OpenClaw](https://github.com/openclaw/openclaw) (~180K GitHub stars, ~900K weekly npm downloads) and [NanoClaw](https://github.com/qwibitai/nanoclaw) (~8K stars). Both are widely covered — OpenClaw has a Lex Fridman episode and its own Wikipedia page; NanoClaw landed a VentureBeat feature and multiple Hacker News front pages.
+
+hello-claw is not trying to compete on breadth or popularity. It was built around a different set of priorities:
+
+| | OpenClaw | NanoClaw | hello-claw |
+|---|---|---|---|
+| **SDK** | Pi agent framework (independent) | Claude Agent SDK | Claude Agent SDK |
+| **Model** | Multi-provider (15+), Opus default | SDK default (no override) | Opus 4.6, adaptive thinking, 1M context |
+| **Channels** | 15+ (WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Teams…) | WhatsApp | Slack (single DM) |
+| **Tools** | 64 tool files + 51 skills + 36 extensions | 6 MCP tools + browser skill | 9 MCP servers (25+ tools) — slack, cron, media, search, brain, github, oracle, voice, audio |
+| **Security** | Docker isolation (optional), no secret stripping, no network allowlist | Apple Container VMs, env sanitization, no network restriction, no audit log | Seatbelt sandbox + `allowedDomains` proxy + secret stripping + PreToolUse policy + CLAUDE.md integrity + JSONL audit |
+| **SDK depth** | Not used | Deep (query, sessions, hooks, env, agent teams) | Deep (query, sessions, hooks, plugins, allowedTools, allowedDomains, maxBudgetUsd) |
+| **Codebase** | ~527K LOC, 10K+ commits | ~4K LOC, ~200 commits | ~3K LOC |
+| **Approval workflow** | None | None | Emoji reaction-based (cron + GitHub writes) |
+
+**Where hello-claw differs:**
+
+- **Max intelligence by default.** Opus 4.6 with adaptive thinking and 1M context — the agent gets the best reasoning the SDK can provide on every turn. OpenClaw supports multiple providers but delegates model config to its own Pi framework. NanoClaw passes no model or thinking parameters at all.
+- **Security in depth.** The only project that layers OS sandbox + network domain allowlist + secret stripping from `process.env` + PreToolUse hook blocking + CLAUDE.md tamper detection + per-tool JSONL audit logging. OpenClaw has no sandbox by default and no secret stripping. NanoClaw has strong container isolation but no network restriction or audit trail.
+- **SDK-native.** Built directly on `query()` with hooks, plugins, sessions, `allowedDomains`, and `allowedTools` — using the Anthropic Agent SDK as designed rather than wrapping a separate framework. OpenClaw doesn't use the SDK at all.
+- **Useful tool diversity.** Nine purpose-built MCP servers covering messaging, scheduling, image generation, web research, cognitive support, GitHub issues, cross-model oracle, voice synthesis, and audio transcription — each with a behavioral skill that teaches the agent when and how to use it.
+- **Human-in-the-loop.** Cron tasks and GitHub writes require emoji-reaction approval before execution. Neither OpenClaw nor NanoClaw has an approval workflow.
+
 ## Philosophy
 
 > *"hello-claw isn't a chatbot framework. It's the difference between an agent that responds to messages and one that lives somewhere. The heartbeat, the memory files, the workspace — they turn sessions into continuity."*
