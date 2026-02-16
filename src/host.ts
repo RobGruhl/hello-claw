@@ -109,11 +109,39 @@ const app = new App({
   logLevel: LogLevel.INFO,
 });
 
+/** Extract full text from Slack rich_text blocks (message.blocks).
+ *  Slack's modern clients send messages with blocks; the top-level `text`
+ *  field can be a truncated plain-text fallback with a trailing "…". */
+function extractTextFromBlocks(blocks: any[] | undefined): string | null {
+  if (!blocks || !Array.isArray(blocks)) return null;
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type !== 'rich_text' || !Array.isArray(block.elements)) continue;
+    for (const section of block.elements) {
+      if (!Array.isArray(section.elements)) continue;
+      for (const el of section.elements) {
+        if (el.type === 'text') parts.push(el.text ?? '');
+        else if (el.type === 'link') parts.push(el.text ?? el.url ?? '');
+        else if (el.type === 'emoji') parts.push(el.unicode ? String.fromCodePoint(...el.unicode.split('-').map((h: string) => parseInt(h, 16))) : `:${el.name}:`);
+        else if (el.type === 'user') parts.push(`<@${el.user_id}>`);
+        else if (el.type === 'channel') parts.push(`<#${el.channel_id}>`);
+      }
+      // rich_text_list / rich_text_preformatted / rich_text_quote are siblings of rich_text_section
+      if (section.type === 'rich_text_list' || section.type === 'rich_text_quote' || section.type === 'rich_text_preformatted') {
+        parts.push('\n');
+      }
+    }
+  }
+  return parts.length > 0 ? parts.join('') : null;
+}
+
 app.message(async ({ message, say }) => {
   // Skip bot messages and edits, but allow file_share subtype (user sent image with text)
   if (message.subtype && message.subtype !== 'file_share') return;
 
-  const text = ('text' in message ? message.text : '') || '';
+  const blockText = extractTextFromBlocks((message as any).blocks);
+  const fallbackText = ('text' in message ? message.text : '') || '';
+  const text = blockText || fallbackText;
   const files = ('files' in message ? (message as any).files : undefined) as Array<{
     id: string; name?: string; mimetype?: string; size?: number;
   }> | undefined;
