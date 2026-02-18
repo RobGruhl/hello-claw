@@ -302,13 +302,18 @@ The agent runs inside an OS-level sandbox. MCP servers run outside the sandbox i
 
 ## Agent Intelligence
 
-The agent runs best with maximum intelligence settings in the `query()` call:
+> **⚠️ Cost Warning:** hello-claw v1.0 ships in **maximum intelligence mode** — every query uses the most capable and most expensive model, reasoning level, and context window available. This is a deliberate choice for research and development: it produces the best agent behavior and lets you explore the full capability ceiling. However, it is **not cost-optimized for sustained deployment.** If you run the agent continuously with heartbeats, cron tasks, and active conversation, API costs will accumulate quickly. See [Cost Optimization Roadmap](#cost-optimization-roadmap-v11) below for planned improvements.
+
+The agent runs with maximum intelligence settings in the `query()` call:
 
 - **Model**: `claude-opus-4-6` — most capable, supports adaptive thinking
 - **Thinking**: `{ type: "adaptive" }` — SDK chooses reasoning depth per turn
+- **Effort**: `max` — highest reasoning effort on every turn
 - **Context**: 1M token beta (`context-1m-2025-08-07`)
 - **Budget cap**: `$50` per session via `maxBudgetUsd`
 - **System prompt**: loaded from `src/lib/system-prompt.ts` with behavioral skills appended via `plugins`
+
+This configuration prioritizes agent quality over cost efficiency. Every API round-trip includes the full tool schema for all 33 MCP tools (~14K tokens), the system prompt, all loaded skills, and the accumulated conversation history. The heartbeat creates a fresh session every 30 minutes at full intelligence. Cron tasks resume the interactive session with the same settings.
 
 See the [Claude Agent SDK docs](https://docs.anthropic.com/en/docs/agents/claude-code/sdk) for all available options.
 
@@ -336,6 +341,19 @@ hello-claw is not trying to compete on breadth or popularity. It was built aroun
 - **SDK-native.** Built directly on `query()` with hooks, plugins, sessions, `allowedDomains`, and `allowedTools` — using the Anthropic Agent SDK as designed rather than wrapping a separate framework. OpenClaw doesn't use the SDK at all.
 - **Useful tool diversity.** Nine purpose-built MCP servers covering messaging, scheduling, image generation, web research, cognitive support, GitHub issues, cross-model oracle, voice synthesis, and audio transcription — each with a behavioral skill that teaches the agent when and how to use it.
 - **Human-in-the-loop.** Cron tasks and GitHub writes require emoji-reaction approval before execution. Neither OpenClaw nor NanoClaw has an approval workflow.
+
+## Cost Optimization Roadmap (v1.1)
+
+The v1.0 configuration is intentionally set to maximum intelligence for research and capability exploration. A v1.1 release will introduce cost optimizations to make sustained deployment practical without sacrificing the quality of interactive conversations. Areas under investigation:
+
+- **Tiered model selection** — Use lighter models (Haiku or Sonnet) for autonomous background tasks like heartbeats and scheduled jobs, reserving Opus for interactive conversations where reasoning quality matters most
+- **Adaptive effort levels** — Match the SDK's `effort` parameter to task complexity. A heartbeat check-in that reads recent history and decides "nothing to do" doesn't need the same reasoning depth as a multi-step user request
+- **Session rotation** — The current design resumes a single session indefinitely, accumulating conversation history that gets re-sent on every API call. Periodic session rotation with memory continuity via workspace files would cap context growth
+- **Tool schema reduction** — All 33 tool definitions are serialized into every API request. Lazy-loading rarely-used tool sets (browser, firecrawl, oracle, voice) only when needed would reduce per-call overhead
+- **Heartbeat frequency** — Reducing from every 30 minutes to every 60 minutes (or longer) halves the autonomous query volume with minimal impact on responsiveness
+- **Skill loading efficiency** — All 10 skill files load on session creation. Heartbeats and cron tasks could load only the skills relevant to their narrower tool set
+
+These optimizations are purely about API cost efficiency — the security model, tool capabilities, and agent architecture remain unchanged.
 
 ## Philosophy
 
