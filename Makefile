@@ -6,7 +6,7 @@ MINI         ?= $(shell hostname -s)
 # App files to include in the package (no node_modules, dist, data, workspace)
 APP_FILES := package.json package-lock.json tsconfig.json src plugins workspace-seed constitution .env.example
 
-.PHONY: package snapshot clean
+.PHONY: package snapshot clean cost-viz
 
 ## package: Build hello-claw-bootstrap.zip
 package:
@@ -43,6 +43,14 @@ snapshot:
 		ssh $(MINI) "rm /tmp/hello-claw-state-$$STAMP.tar.gz"; \
 		echo "  ✓ hello-claw-state-$$STAMP.tar.gz"; \
 	fi
+
+## cost-viz: Rsync API logs from Mini, extract, and report
+##   make cost-viz              # uses MINI (defaults to hostname, override with MINI=$MINI_HOST)
+cost-viz:
+	@mkdir -p tools/cost-viz/data/raw
+	rsync -avz $(MINI):~/hello-claw/app/data/api-logs/ tools/cost-viz/data/raw/
+	bun tools/cost-viz/extract.ts tools/cost-viz/data/raw/ > tools/cost-viz/data/sessions.json
+	@echo "==> Extracted. Run /start-viz or: python3 -m http.server 8765 -d tools/cost-viz"
 
 ## clean: Remove build artifacts
 clean:

@@ -256,7 +256,7 @@ async function executeTask(task: ScheduledTask, app: App, anthropicApiKey: strin
         model: AGENT_MODEL,
         thinking: { type: 'adaptive' },
         effort: 'max',
-        betas: [...BETAS],
+        betas: [...BETAS] as any,
         maxBudgetUsd: MAX_BUDGET_USD,
         systemPrompt: buildSystemPrompt(workDir, userName),
         cwd: workDir,

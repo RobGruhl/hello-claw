@@ -16,7 +16,7 @@ export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 
 ### 1. Read MINI_HOST from .env
 
-Read the project root `.env` file and extract the `MINI_HOST` value. If the file doesn't exist or `MINI_HOST` is not set, ask the user for the Mini's hostname (e.g., `hue.local`).
+Read the project root `.env` file and extract the `MINI_HOST` value. If the file doesn't exist or `MINI_HOST` is not set, ask the user for the Mini's hostname (e.g., `your-mini.local`).
 
 Store it as `$MINI_HOST` for all subsequent commands.
 

@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API Cost Visualization</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+    min-height: 100vh;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .stat {
+    font-size: 13px;
+    color: var(--text-muted);
+    padding: 4px 10px;
+    background: var(--surface);
+    border-radius: 4px;
+  }
+  .stat strong { color: var(--text); }
+  .toggle-group {
+    display: flex;
+    gap: 0;
+    margin-bottom: 16px;
+  }
+  .toggle-btn {
+    background: var(--surface);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    padding: 6px 16px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .toggle-btn:first-child { border-radius: 6px 0 0 6px; }
+  .toggle-btn:last-child { border-radius: 0 6px 6px 0; }
+  .toggle-btn.active {
+    background: var(--accent);
+    color: #0f172a;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .chart-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+    position: relative;
+    height: 420px;
+  }
+  .legend-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .legend-swatch.striped {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      transparent,
+      transparent 2px,
+      rgba(255,255,255,0.35) 2px,
+      rgba(255,255,255,0.35) 4px
+    );
+  }
+  .legend-note {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .quality-notice {
+    background: #1c1917;
+    border: 1px solid #78350f;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: #fbbf24;
+  }
+  .quality-notice strong { color: #fde68a; }
+  .quality-notice ul { margin: 6px 0 0 16px; color: #d4a74a; }
+  .detail-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    font-size: 13px;
+    display: none;
+  }
+  .detail-panel.visible { display: block; }
+  .detail-panel h3 {
+    font-size: 14px;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 8px;
+  }
+  .detail-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .detail-label { color: var(--text-muted); }
+  .detail-value { font-weight: 600; }
+  .detail-value.actual { color: #4ade80; }
+  .detail-value.estimate { color: #fbbf24; }
+  .breakdown-table {
+    width: 100%;
+    margin-top: 12px;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .breakdown-table th {
+    text-align: left;
+    color: var(--text-muted);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .breakdown-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+  .breakdown-table .est { color: #fbbf24; font-style: italic; }
+  .mutations-section {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 6px;
+  }
+  .mutations-section h4 {
+    font-size: 12px;
+    color: #f87171;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .mutation-item {
+    font-size: 11px;
+    margin-bottom: 6px;
+    padding: 4px 6px;
+    background: rgba(0,0,0,0.2);
+    border-radius: 4px;
+  }
+  .mutation-section-name {
+    color: #fbbf24;
+    font-weight: 600;
+  }
+  .mutation-context {
+    color: #94a3b8;
+    word-break: break-all;
+    margin-top: 2px;
+  }
+  .mutation-context .diff-old { color: #f87171; }
+  .mutation-context .diff-new { color: #4ade80; }
+  .mutation-meta {
+    color: #64748b;
+    font-size: 10px;
+  }
+  .loading {
+    text-align: center;
+    padding: 60px;
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+  .error-msg {
+    color: #f87171;
+    padding: 20px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>API Cost Viz</h1>
+  <select id="sessionSelect"></select>
+  <span class="stat" id="callCount"></span>
+  <span class="stat" id="totalCost"></span>
+</div>
+
+<div class="toggle-group">
+  <button class="toggle-btn active" data-mode="tokens" onclick="setMode('tokens')">Tokens</button>
+  <button class="toggle-btn" data-mode="cost" onclick="setMode('cost')">Cost USD</button>
+</div>
+
+<div class="chart-container">
+  <canvas id="chart"></canvas>
+</div>
+
+<div class="legend-container" id="legend"></div>
+
+<div class="quality-notice">
+  <strong>Data Quality</strong>
+  <ul>
+    <li>Category breakdown: <strong>ESTIMATED</strong> (chars/4)</li>
+    <li>Cache per-category: <strong>ESTIMATED</strong> (prefix waterfall)</li>
+    <li>Total cost per call: <strong>ACTUAL</strong> (API reported)</li>
+    <li>Output thinking/text split: <strong>NOT AVAILABLE</strong></li>
+  </ul>
+</div>
+
+<div class="detail-panel" id="detailPanel">
+  <h3 id="detailTitle">Call Detail</h3>
+  <div class="detail-grid" id="detailGrid"></div>
+  <table class="breakdown-table" id="breakdownTable"></table>
+</div>
+
+<div class="loading" id="loadingMsg">Loading data/sessions.json...</div>
+<div class="error-msg" id="errorMsg" style="display:none"></div>
+
+<script>
+// --- Config ---
+const CATEGORIES = [
+  { key: 'system',       label: 'System Prompt',  color: '#2563eb' },
+  { key: 'tools',        label: 'Tool Schemas',   color: '#7c3aed' },
+  { key: 'sdk_injected', label: 'SDK/Skills',     color: '#0891b2' },
+  { key: 'user_messages',label: 'User Messages',  color: '#059669' },
+  { key: 'thinking',     label: 'Thinking',       color: '#d97706' },
+  { key: 'response_text',label: 'Response Text',  color: '#dc2626' },
+  { key: 'tool_calls',   label: 'Tool Calls',     color: '#9333ea' },
+  { key: 'tool_results', label: 'Tool Results',   color: '#ea580c' },
+];
+const OUTPUT_COLOR = '#111827';
+const OUTPUT_BORDER = '#6b7280';
+
+// Block type → color (blocks use singular names)
+const BLOCK_COLORS = {
+  system:       '#2563eb',
+  tools:        '#7c3aed',
+  sdk_injected: '#0891b2',
+  user_message: '#059669',
+  thinking:     '#d97706',
+  response_text:'#dc2626',
+  tool_call:    '#9333ea',
+  tool_result:  '#ea580c',
+  output:       OUTPUT_COLOR,
+};
+const BLOCK_LABELS = {
+  system:       'System Prompt',
+  tools:        'Tool Schemas',
+  sdk_injected: 'SDK/Skills',
+  user_message: 'User Message',
+  thinking:     'Thinking',
+  response_text:'Response Text',
+  tool_call:    'Tool Call',
+  tool_result:  'Tool Result',
+  output:       'Output',
+};
+
+// --- State ---
+let data = null;
+let chart = null;
+let currentMode = 'tokens'; // 'tokens' | 'cost'
+let currentSession = null;
+
+// --- Stripe pattern ---
+function createStripePattern(color) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 10;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, 10, 10);
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, 10);
+  ctx.lineTo(10, 0);
+  ctx.stroke();
+  return ctx.createPattern(c, 'repeat');
+}
+
+// --- Pricing for cost mode ---
+const PRICING = {
+  standard: { input: 5/1e6, cache_write: 6.25/1e6, cache_read: 0.5/1e6, output: 25/1e6 },
+  long:     { input: 10/1e6, cache_write: 12.5/1e6, cache_read: 1.0/1e6, output: 37.5/1e6 },
+};
+
+function tokensToCost(tokens, rate) {
+  return tokens * rate;
+}
+
+// --- Load data ---
+async function loadData() {
+  try {
+    const resp = await fetch('data/sessions.json');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    data = await resp.json();
+    document.getElementById('loadingMsg').style.display = 'none';
+    populateSessionDropdown();
+    buildLegend();
+    if (data.sessions.length > 0) {
+      selectSession(data.sessions[0].session_id);
+    }
+  } catch (err) {
+    document.getElementById('loadingMsg').style.display = 'none';
+    document.getElementById('errorMsg').textContent =
+      `Failed to load data: ${err.message}. Make sure to serve this page from a web server (e.g., bunx serve tools/cost-viz/ or python3 -m http.server -d tools/cost-viz).`;
+    document.getElementById('errorMsg').style.display = 'block';
+  }
+}
+
+function populateSessionDropdown() {
+  const sel = document.getElementById('sessionSelect');
+  for (const s of data.sessions) {
+    const opt = document.createElement('option');
+    opt.value = s.session_id;
+    const date = s.first_ts ? new Date(s.first_ts).toLocaleString() : '?';
+    opt.textContent = `${s.session_id} (${s.call_count} calls) — $${s.total_cost_usd.toFixed(2)}`;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener('change', () => selectSession(sel.value));
+}
+
+function buildLegend() {
+  const container = document.getElementById('legend');
+  let html = '';
+  for (const cat of CATEGORIES) {
+    html += `<span class="legend-item">
+      <span class="legend-swatch" style="background:${cat.color}"></span>
+      ${cat.label}
+    </span>`;
+  }
+  html += `<span class="legend-item">
+    <span class="legend-swatch" style="background:${OUTPUT_COLOR};border-color:${OUTPUT_BORDER}"></span>
+    Output
+  </span>`;
+  html += `<span class="legend-item">
+    <span class="legend-swatch striped" style="background-color:#475569"></span>
+    <span class="legend-note">= cached (striped)</span>
+  </span>`;
+  html += `<span class="legend-item">
+    <span style="color:#ef4444;font-size:14px">\u25c6</span>
+    <span class="legend-note">= cache mutation detected</span>
+  </span>`;
+  html += `<span class="legend-note" style="width:100%; margin-top:4px">Blocks stacked chronologically — system/tools at bottom, latest conversation turns at top. Dimmed bars with * = subagent calls.</span>`;
+  container.innerHTML = html;
+}
+
+function selectSession(sessionId) {
+  currentSession = data.sessions.find(s => s.session_id === sessionId);
+  if (!currentSession) return;
+
+  document.getElementById('sessionSelect').value = sessionId;
+  document.getElementById('callCount').innerHTML = `<strong>${currentSession.call_count}</strong> calls`;
+  document.getElementById('totalCost').innerHTML = `<strong>$${currentSession.total_cost_usd.toFixed(2)}</strong> total`;
+
+  document.getElementById('detailPanel').classList.remove('visible');
+  renderChart();
+}
+
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  if (currentSession) renderChart();
+}
+
+// --- Block cost computation ---
+function computeBlockValue(block, call) {
+  if (currentMode === 'tokens') return block.est_tokens;
+  const p = call.long_context ? PRICING.long : PRICING.standard;
+  if (block.type === 'output') return block.est_tokens * p.output;
+  return block.cache_read * p.cache_read
+       + block.cache_creation * p.cache_write
+       + block.uncached * p.input;
+}
+
+// --- Stripe pattern cache ---
+const _stripeCache = {};
+function getStripePattern(color) {
+  if (!_stripeCache[color]) _stripeCache[color] = createStripePattern(color);
+  return _stripeCache[color];
+}
+
+// --- Mutation marker plugin ---
+const mutationMarkerPlugin = {
+  id: 'mutationMarker',
+  afterDatasetsDraw(chart) {
+    const calls = currentSession?.calls;
+    if (!calls) return;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta || !meta.data.length) return;
+    const ctx = chart.ctx;
+    const area = chart.chartArea;
+    for (let i = 0; i < calls.length; i++) {
+      const m = calls[i].prefix_mutations;
+      if (!m || m.length === 0) continue;
+      const bar = meta.data[i];
+      if (!bar) continue;
+      const x = bar.x;
+      const y = area.top - 4;
+      const size = 5;
+      ctx.save();
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.moveTo(x, y - size);
+      ctx.lineTo(x + size, y);
+      ctx.lineTo(x, y + size);
+      ctx.lineTo(x - size, y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+};
+
+// --- Subagent dimming plugin ---
+const subagentDimPlugin = {
+  id: 'subagentDim',
+  afterDatasetsDraw(chart) {
+    const calls = currentSession?.calls;
+    if (!calls) return;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta || !meta.data.length) return;
+    const ctx = chart.ctx;
+    for (let i = 0; i < calls.length; i++) {
+      if (!calls[i].is_subagent) continue;
+      const bar = meta.data[i];
+      if (!bar) continue;
+      const x = bar.x - bar.width / 2;
+      const area = chart.chartArea;
+      ctx.save();
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.6)';
+      ctx.fillRect(x, area.top, bar.width, area.bottom - area.top);
+      ctx.restore();
+    }
+  }
+};
+
+// --- Chart rendering (chronological blocks) ---
+function renderChart() {
+  const calls = currentSession.calls;
+  const labels = calls.map(c => c.is_subagent ? `#${c.call_num}*` : `#${c.call_num}`);
+  const chartCtx = document.getElementById('chart').getContext('2d');
+
+  // Find max blocks across all calls
+  const maxBlocks = Math.max(...calls.map(c => (c.blocks || []).length));
+  if (maxBlocks === 0) return;
+
+  // Build one dataset per slot (bottom-up: slot 0 = first block = system)
+  const datasets = [];
+  for (let slot = 0; slot < maxBlocks; slot++) {
+    datasets.push({
+      label: `Block ${slot}`,
+      data: calls.map(c => {
+        const b = (c.blocks || [])[slot];
+        return b ? computeBlockValue(b, c) : 0;
+      }),
+      backgroundColor: calls.map(c => {
+        const b = (c.blocks || [])[slot];
+        if (!b) return 'transparent';
+        const color = BLOCK_COLORS[b.type] || '#475569';
+        // Fully cached blocks get stripe pattern
+        if (b.cache_read > 0 && b.cache_creation === 0 && b.uncached === 0 && b.type !== 'output') {
+          return getStripePattern(color);
+        }
+        return color;
+      }),
+      borderColor: calls.map(c => {
+        const b = (c.blocks || [])[slot];
+        return (b && b.type === 'output') ? OUTPUT_BORDER : 'transparent';
+      }),
+      borderWidth: calls.map(c => {
+        const b = (c.blocks || [])[slot];
+        return (b && b.type === 'output') ? 1 : 0;
+      }),
+      stack: 'main',
+      _slot: slot,
+    });
+  }
+
+  if (chart) chart.destroy();
+
+  chart = new Chart(chartCtx, {
+    type: 'bar',
+    data: { labels, datasets },
+    plugins: [subagentDimPlugin, mutationMarkerPlugin],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: { top: 14 } },
+      interaction: { mode: 'index', intersect: false },
+      onClick: (_, elements) => {
+        if (elements.length > 0) showDetail(elements[0].index);
+      },
+      scales: {
+        x: {
+          stacked: true,
+          ticks: {
+            color: (ctx) => {
+              const call = currentSession?.calls[ctx.index];
+              return call?.is_subagent ? '#64748b' : '#94a3b8';
+            },
+            font: { family: 'monospace', size: 11 },
+          },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+        },
+        y: {
+          stacked: true,
+          ticks: {
+            color: '#94a3b8',
+            font: { family: 'monospace', size: 11 },
+            callback: function(v) {
+              if (currentMode === 'cost') return '$' + v.toFixed(2);
+              if (v >= 1000) return (v / 1000).toFixed(0) + 'K';
+              return v;
+            },
+          },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          title: {
+            display: true,
+            text: currentMode === 'cost' ? 'Cost (USD)' : 'Tokens',
+            color: '#94a3b8',
+            font: { family: 'monospace', size: 12 },
+          },
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1e293b',
+          borderColor: '#475569',
+          borderWidth: 1,
+          titleFont: { family: 'monospace', size: 12 },
+          bodyFont: { family: 'monospace', size: 11 },
+          titleColor: '#e2e8f0',
+          bodyColor: '#cbd5e1',
+          callbacks: {
+            title: function(items) {
+              if (!items.length) return '';
+              const idx = items[0].dataIndex;
+              const call = currentSession.calls[idx];
+              const nblocks = (call.blocks || []).length;
+              const sub = call.is_subagent ? ' [SUBAGENT]' : '';
+              return `Call #${call.call_num}${sub} — $${call.cost_usd.total.toFixed(4)} (${nblocks} blocks)`;
+            },
+            label: function(item) {
+              if (item.raw === 0) return null;
+              const idx = item.dataIndex;
+              const call = currentSession.calls[idx];
+              const slot = item.dataset._slot;
+              const b = (call.blocks || [])[slot];
+              if (!b) return null;
+              const label = BLOCK_LABELS[b.type] || b.type;
+              const cached = (b.cache_read > 0 && b.cache_creation === 0 && b.uncached === 0) ? ' [cached]' : '';
+              if (currentMode === 'cost') {
+                return `  ${label}${cached}: $${item.raw.toFixed(4)}`;
+              }
+              return `  ${label}${cached}: ${formatTokens(b.est_tokens)} (est.)`;
+            },
+            footer: function(items) {
+              if (!items.length) return '';
+              const idx = items[0].dataIndex;
+              const call = currentSession.calls[idx];
+              const totalInput = call.api_tokens.input + call.api_tokens.cache_creation + call.api_tokens.cache_read;
+              const cacheHit = totalInput > 0
+                ? ((call.api_tokens.cache_read / totalInput) * 100).toFixed(0) : '0';
+              const lines = [''];
+              if (call.is_subagent) {
+                lines.push(`Subagent tools: ${call.tool_names.join(', ')}`);
+              }
+              lines.push(
+                `Actual: ${formatTokens(totalInput)} in + ${formatTokens(call.output_tokens)} out`,
+                `Cache hit: ${cacheHit}%` + (call.long_context ? ' | LONG CONTEXT (2x)' : ''),
+                `Duration: ${(call.duration_ms / 1000).toFixed(1)}s`,
+              );
+              // Mutation summary
+              const mutations = call.prefix_mutations;
+              if (mutations && mutations.length > 0) {
+                lines.push('');
+                const sections = mutations.map(m => m.section).join(', ');
+                lines.push(`\u25c6 Cache mutation: ${sections}`);
+                // Show first mutation context (truncated)
+                const ctx = mutations[0].context;
+                if (ctx.length > 80) {
+                  lines.push('  ' + ctx.slice(0, 80) + '...');
+                } else {
+                  lines.push('  ' + ctx);
+                }
+              }
+              lines.push('', 'Click bar for details');
+              return lines;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+function formatTokens(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return n.toString();
+}
+
+// --- Detail panel ---
+function showDetail(callIndex) {
+  const call = currentSession.calls[callIndex];
+  if (!call) return;
+
+  const panel = document.getElementById('detailPanel');
+  panel.classList.add('visible');
+
+  const totalInput = call.api_tokens.input + call.api_tokens.cache_creation + call.api_tokens.cache_read;
+  const cacheHit = totalInput > 0 ? ((call.api_tokens.cache_read / totalInput) * 100).toFixed(1) : '0';
+
+  document.getElementById('detailTitle').textContent =
+    `Call #${call.call_num} — ${new Date(call.ts).toLocaleString()}`;
+
+  const grid = document.getElementById('detailGrid');
+  grid.innerHTML = `
+    <div class="detail-item">
+      <span class="detail-label">Total tokens (actual)</span>
+      <span class="detail-value actual">${formatTokens(totalInput)} in + ${formatTokens(call.output_tokens)} out</span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Cost (actual)</span>
+      <span class="detail-value actual">$${call.cost_usd.total.toFixed(4)}</span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Cache hit</span>
+      <span class="detail-value actual">${cacheHit}%</span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Long context (>200K)</span>
+      <span class="detail-value ${call.long_context ? 'estimate' : ''}">${call.long_context ? 'YES (2x pricing)' : 'No'}</span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Duration</span>
+      <span class="detail-value">${(call.duration_ms / 1000).toFixed(1)}s</span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Messages</span>
+      <span class="detail-value">${call.message_count}</span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Tools available</span>
+      <span class="detail-value">${call.tool_count}</span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Input breakdown (actual)</span>
+      <span class="detail-value actual">
+        ${formatTokens(call.api_tokens.cache_read)} read +
+        ${formatTokens(call.api_tokens.cache_creation)} write +
+        ${formatTokens(call.api_tokens.input)} uncached
+      </span>
+    </div>
+    <div class="detail-item">
+      <span class="detail-label">Cost breakdown (actual)</span>
+      <span class="detail-value actual">
+        $${call.cost_usd.cache_read.toFixed(4)} read +
+        $${call.cost_usd.cache_creation.toFixed(4)} write +
+        $${call.cost_usd.input.toFixed(4)} input +
+        $${call.cost_usd.output.toFixed(4)} output
+      </span>
+    </div>
+  `;
+
+  // Category breakdown table
+  const table = document.getElementById('breakdownTable');
+  let tableHtml = `
+    <tr>
+      <th>Category</th>
+      <th>Chars</th>
+      <th>Est. Tokens</th>
+      <th>Cache Read</th>
+      <th>Cache Write</th>
+      <th>Uncached</th>
+    </tr>
+  `;
+  for (const cat of CATEGORIES) {
+    const info = call.categories[cat.key];
+    if (!info || info.est_tokens === 0) continue;
+    tableHtml += `
+      <tr>
+        <td>${cat.label}</td>
+        <td class="est">${formatTokens(info.chars)}</td>
+        <td class="est">${formatTokens(info.est_tokens)}</td>
+        <td>${formatTokens(info.cache_read)}</td>
+        <td>${formatTokens(info.cache_creation)}</td>
+        <td>${formatTokens(info.uncached)}</td>
+      </tr>
+    `;
+  }
+  tableHtml += `
+    <tr>
+      <td><strong>Output</strong></td>
+      <td>—</td>
+      <td><strong>${formatTokens(call.output_tokens)}</strong></td>
+      <td colspan="3">—</td>
+    </tr>
+  `;
+  table.innerHTML = tableHtml;
+
+  // Mutations section
+  let existingMutSection = document.getElementById('mutationsSection');
+  if (existingMutSection) existingMutSection.remove();
+
+  const mutations = call.prefix_mutations;
+  if (mutations && mutations.length > 0) {
+    const mutDiv = document.createElement('div');
+    mutDiv.id = 'mutationsSection';
+    mutDiv.className = 'mutations-section';
+    let mutHtml = `<h4>\u25c6 Cache Mutations (${mutations.length})</h4>`;
+    for (const m of mutations) {
+      const sectionLabel = m.section === 'sdk_injected' && m.section_index !== undefined
+        ? `sdk_injected[${m.section_index}]`
+        : m.section;
+      const lenDelta = m.curr_len - m.prev_len;
+      const lenStr = lenDelta === 0 ? 'same length'
+        : lenDelta > 0 ? `+${lenDelta} chars` : `${lenDelta} chars`;
+
+      // Colorize context: content between { → } gets diff coloring
+      let colorCtx = escapeHtml(m.context);
+      colorCtx = colorCtx.replace(
+        /\{([^→}]*)\s→\s([^}]*)\}/g,
+        '{<span class="diff-old">$1</span> → <span class="diff-new">$2</span>}'
+      );
+      // Colorize +[...] and -[...]
+      colorCtx = colorCtx.replace(
+        /\+\[([^\]]*)\]/g,
+        '<span class="diff-new">+[$1]</span>'
+      );
+      colorCtx = colorCtx.replace(
+        /-\[([^\]]*)\]/g,
+        '<span class="diff-old">-[$1]</span>'
+      );
+
+      mutHtml += `<div class="mutation-item">
+        <span class="mutation-section-name">${sectionLabel}</span>
+        <span class="mutation-meta">${m.divergence_count} region(s), diverge@${m.first_diverge_at}, ${lenStr}</span>`;
+      if (m.tools_added && m.tools_added.length > 0) {
+        mutHtml += `<br><span class="diff-new">+ tools: ${escapeHtml(m.tools_added.join(', '))}</span>`;
+      }
+      if (m.tools_removed && m.tools_removed.length > 0) {
+        mutHtml += `<br><span class="diff-old">- tools: ${escapeHtml(m.tools_removed.join(', '))}</span>`;
+      }
+      mutHtml += `<div class="mutation-context">${colorCtx}</div></div>`;
+    }
+    mutDiv.innerHTML = mutHtml;
+    panel.appendChild(mutDiv);
+  }
+
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// --- Init ---
+loadData();
+</script>
+</body>
+</html>

@@ -12,7 +12,7 @@ Perform a fresh agent initialization on the Mac Mini. This seeds the workspace f
 
 ### 1. Read MINI_HOST from .env
 
-Read the project root `.env` file and extract the `MINI_HOST` value. If the file doesn't exist or `MINI_HOST` is not set, ask the user for the Mini's hostname (e.g., `hue.local`).
+Read the project root `.env` file and extract the `MINI_HOST` value. If the file doesn't exist or `MINI_HOST` is not set, ask the user for the Mini's hostname (e.g., `your-mini.local`).
 
 ### 2. Check for existing agent (CRITICAL — do not skip)
 

@@ -16,17 +16,21 @@ import { createGithubMcp, findPendingWriteByMessageTs, approveWrite, rejectWrite
 import { createOracleMcp } from './mcp/oracle.js';
 import { createVoiceMcp } from './mcp/voice.js';
 import { createAudioMcp } from './mcp/audio.js';
+import { createFirecrawlMcp } from './mcp/firecrawl.js';
+import { createBrowserMcp } from './mcp/browser.js';
 import { createToolPolicy } from './hooks/tool-policy.js';
 import { createAuditHook } from './hooks/audit.js';
-import { getSessionId, saveSessionId } from './lib/sessions.js';
+import { getSessionId, saveSessionId, clearSession, touchSession, evaluateSessionFreshness } from './lib/sessions.js';
 import { ensureWorkspace } from './lib/workspace.js';
 import { snapshotClaudeMd, checkClaudeMdIntegrity } from './lib/integrity.js';
 import { acquireChannelLock } from './lib/channel-lock.js';
 import { writeAuditEntry } from './lib/audit-log.js';
 import { buildSystemPrompt } from './lib/system-prompt.js';
-import { AGENT_MODEL, BETAS, MAX_BUDGET_USD } from './lib/config.js';
+import { AGENT_MODEL, BETAS, MAX_BUDGET_USD, MAX_DAILY_BUDGET_USD } from './lib/config.js';
 import { startHeartbeat, stopHeartbeat } from './lib/heartbeat.js';
 import { startApiProxy, stopApiProxy } from './lib/api-proxy.js';
+import { recordCost, getDailyCost, formatCostSummary } from './lib/cost-tracker.js';
+import { isPaused, setPaused } from './lib/pause.js';
 
 // --- Capture and strip sensitive env vars ---
 // MCP servers (running in the host process) need these values,
@@ -40,6 +44,7 @@ const SECRETS = {
   GH_TOKEN: process.env.GH_TOKEN || '',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY || '',
+  FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY || '',
 };
 
 // Validate required secrets are present before stripping
@@ -58,6 +63,7 @@ delete process.env.PERPLEXITY_API_KEY;
 delete process.env.GH_TOKEN;
 delete process.env.OPENAI_API_KEY;
 delete process.env.ELEVENLABS_API_KEY;
+delete process.env.FIRECRAWL_API_KEY;
 // ANTHROPIC_API_KEY is passed explicitly to query() via `env` option,
 // then stripped so sandboxed Bash can't `env | grep KEY`
 delete process.env.ANTHROPIC_API_KEY;
@@ -75,6 +81,9 @@ const userName = process.env.USER_NAME || 'the user';
 
 // --- Shared workspace (all channels use the same identity) ---
 const workDir = ensureWorkspace();
+
+// Per-channel pending compaction flags (set by /compact, consumed on next message)
+const pendingCompaction = new Set<string>();
 
 function readFileOrEmpty(filePath: string): string {
   try {
@@ -99,7 +108,7 @@ function buildSessionBanner(channelId: string, sessionType: 'fresh' | 'resumed')
     ? `Welcome back ${agentName}, it's ${datePart} at ${timePart} Pacific Time. This is a fresh session.`
     : `Welcome back ${agentName}, it's ${datePart} at ${timePart} Pacific Time. Resuming your previous session.`;
 
-  return `[SESSION CONTEXT]\n${greeting}\nYour cognition is provided by ${AGENT_MODEL} with adaptive thinking, max effort, and 1M context window.\nChannel: ${channelId}`;
+  return `[SESSION CONTEXT]\n${greeting}\nYour cognition is provided by ${AGENT_MODEL} with adaptive thinking, max effort, and 200K context window.\nChannel: ${channelId}`;
 }
 
 const app = new App({
@@ -175,10 +184,56 @@ app.message(async ({ message, say }) => {
 
   const channelId = message.channel;
 
+  // --- Bot commands (! prefix to avoid Slack intercepting / as slash commands) ---
+  const trimmedText = text.trim().toLowerCase();
+  if (trimmedText === '!pause') {
+    setPaused(true, 'manual pause via !pause');
+    await say(`:double_vertical_bar: Agent paused. Send \`!unpause\` to resume.`);
+    return;
+  }
+  if (trimmedText === '!unpause') {
+    setPaused(false);
+    const daily = getDailyCost();
+    await say(`:arrow_forward: Agent resumed. Today's cost: $${daily.totalUsd.toFixed(2)}`);
+    return;
+  }
+  if (trimmedText === '!clear') {
+    clearSession(message.channel);
+    const daily = getDailyCost();
+    await say(`:wastebasket: Session cleared. Starting fresh on your next message. Today: $${daily.totalUsd.toFixed(2)}`);
+    return;
+  }
+  if (trimmedText === '!compact') {
+    // Set a flag — compaction happens on the next real message
+    pendingCompaction.add(message.channel);
+    await say(`:compression: Compaction queued — your next message will compact the context before responding.`);
+    return;
+  }
+
+  // Check pause state (allow !unpause through, block everything else)
+  if (isPaused()) {
+    await say(`_Agent is paused. Send \`!unpause\` to resume._`);
+    return;
+  }
+
   // Acquire per-channel lock (shared with cron) to prevent session collisions
   const release = await acquireChannelLock(channelId);
 
   try {
+    // --- Session lifecycle evaluation ---
+    const freshness = evaluateSessionFreshness(channelId);
+    let forceCompact = pendingCompaction.has(channelId);
+    pendingCompaction.delete(channelId);
+
+    if (freshness.action === 'reset') {
+      console.log(`[host] Session reset for ${channelId}: ${freshness.reason}`);
+      clearSession(channelId);
+    } else if (freshness.action === 'compact' || forceCompact) {
+      const reason = forceCompact ? 'manual /compact' : (freshness.action === 'compact' ? freshness.reason : 'compact');
+      console.log(`[host] Forcing compaction for ${channelId}: ${reason}`);
+      process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '1';
+    }
+
     const sessionId = getSessionId(channelId);
     const sessionType = sessionId ? 'resumed' : 'fresh';
     const banner = buildSessionBanner(channelId, sessionType);
@@ -200,6 +255,8 @@ app.message(async ({ message, say }) => {
     const oracleMcp = createOracleMcp({ openaiApiKey: SECRETS.OPENAI_API_KEY });
     const voiceMcp = createVoiceMcp({ elevenlabsApiKey: SECRETS.ELEVENLABS_API_KEY, workDir, defaultVoiceId: ELEVENLABS_VOICE_ID });
     const audioMcp = createAudioMcp({ openaiApiKey: SECRETS.OPENAI_API_KEY, workDir });
+    const firecrawlMcp = createFirecrawlMcp({ firecrawlApiKey: SECRETS.FIRECRAWL_API_KEY });
+    const browserMcp = createBrowserMcp({ workDir });
 
     // Snapshot CLAUDE.md before the agent runs to detect tampering
     const claudeMdPath = `${workDir}/CLAUDE.md`;
@@ -207,6 +264,9 @@ app.message(async ({ message, say }) => {
 
     let result: string | null = null;
     let newSessionId: string | undefined;
+    let totalCostUsd = 0;
+    let numTurns = 0;
+    let resultUsage: { inputTokens?: number; outputTokens?: number; cacheCreationTokens?: number; cacheReadTokens?: number } = {};
 
     for await (const msg of query({
       prompt,
@@ -214,12 +274,12 @@ app.message(async ({ message, say }) => {
         model: AGENT_MODEL,
         thinking: { type: 'adaptive' },
         effort: 'max',
-        betas: [...BETAS],
+        betas: ['code-execution-web-tools-2026-02-09' as any, ...BETAS],
         maxBudgetUsd: MAX_BUDGET_USD,
         systemPrompt: buildSystemPrompt(workDir, userName),
         cwd: workDir,
         resume: sessionId,
-        env: { ...process.env, ANTHROPIC_API_KEY: SECRETS.ANTHROPIC_API_KEY },
+        env: { ...process.env, ANTHROPIC_API_KEY: SECRETS.ANTHROPIC_API_KEY, ENABLE_TOOL_SEARCH: 'true' },
         ...(sessionId ? {} : { plugins: [{ type: 'local' as const, path: path.resolve('plugins') }] }),
         allowedTools: [
           'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
@@ -230,6 +290,8 @@ app.message(async ({ message, say }) => {
           'mcp__oracle__*',
           'mcp__voice__*',
           'mcp__audio__*',
+          'mcp__firecrawl__*',
+          'mcp__browser__*',
         ],
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
@@ -257,6 +319,8 @@ app.message(async ({ message, say }) => {
           oracle: oracleMcp,
           voice: voiceMcp,
           audio: audioMcp,
+          firecrawl: firecrawlMcp,
+          browser: browserMcp,
         },
         hooks: {
           PreToolUse: [{ hooks: [createToolPolicy(workDir, channelId)] }],
@@ -269,15 +333,80 @@ app.message(async ({ message, say }) => {
       if (msg.type === 'system' && msg.subtype === 'init') {
         newSessionId = msg.session_id;
       }
-      if ('result' in msg && msg.result) {
-        result = msg.result as string;
+      if (msg.type === 'result') {
+        const resultMsg = msg as any;
+        totalCostUsd = resultMsg.total_cost_usd || 0;
+        numTurns = resultMsg.num_turns || 0;
+        if (resultMsg.usage) {
+          resultUsage = {
+            inputTokens: resultMsg.usage.inputTokens,
+            outputTokens: resultMsg.usage.outputTokens,
+            cacheCreationTokens: resultMsg.usage.cacheCreationInputTokens,
+            cacheReadTokens: resultMsg.usage.cacheReadInputTokens,
+          };
+        }
+        if ('result' in resultMsg && resultMsg.result) {
+          result = resultMsg.result as string;
+        }
       }
     }
 
     if (newSessionId) saveSessionId(channelId, newSessionId);
 
+    // Clean up compaction override
+    delete process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
+
+    // Update session timestamp
+    touchSession(channelId);
+
     // Check CLAUDE.md integrity — restore if tampered
     checkClaudeMdIntegrity(claudeMdPath, claudeMdSnapshot, channelId);
+
+    // --- Cost tracking ---
+    if (totalCostUsd > 0) {
+      const daily = recordCost({
+        timestamp: new Date().toISOString(),
+        source: 'interactive',
+        channelId,
+        costUsd: totalCostUsd,
+        numTurns,
+        inputTokens: resultUsage.inputTokens,
+        outputTokens: resultUsage.outputTokens,
+        cacheCreationTokens: resultUsage.cacheCreationTokens,
+        cacheReadTokens: resultUsage.cacheReadTokens,
+      });
+
+      // Post cost summary to Slack
+      const summary = formatCostSummary(totalCostUsd, numTurns, daily.totalUsd);
+      try {
+        await app.client.chat.postMessage({
+          channel: channelId,
+          text: `_${summary}_`,
+        });
+      } catch { /* best-effort */ }
+
+      // Budget alerts
+      const halfBudget = MAX_DAILY_BUDGET_USD / 2;
+      const prevTotal = daily.totalUsd - totalCostUsd;
+      if (prevTotal < halfBudget && daily.totalUsd >= halfBudget) {
+        try {
+          await app.client.chat.postMessage({
+            channel: channelId,
+            text: `:warning: Daily cost at $${daily.totalUsd.toFixed(2)} — 50% of $${MAX_DAILY_BUDGET_USD} budget.`,
+          });
+        } catch { /* best-effort */ }
+      }
+
+      if (daily.totalUsd >= MAX_DAILY_BUDGET_USD) {
+        setPaused(true, `daily budget exceeded ($${daily.totalUsd.toFixed(2)})`);
+        try {
+          await app.client.chat.postMessage({
+            channel: channelId,
+            text: `:octagonal_sign: *Auto-paused* — daily cost $${daily.totalUsd.toFixed(2)} exceeded $${MAX_DAILY_BUDGET_USD} budget. Send \`!unpause\` to resume.`,
+          });
+        } catch { /* best-effort */ }
+      }
+    }
 
     if (result) {
       console.log(`[host] query() returned ${result.length} chars (discarded — agent must use send_message)`);
