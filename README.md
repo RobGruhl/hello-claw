@@ -1,9 +1,23 @@
+<p align="center">
+  <img src="hello-claw-house.jpg" width="600" alt="Watercolor cottage with crab motifs and a 'hello claw' doormat" />
+</p>
+
 # hello-claw
 
-A Slack-connected autonomous agent built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-code/sdk). It listens to Slack messages via Socket Mode, runs Claude with in-process MCP servers for Slack messaging, task scheduling, image generation, web search, cognitive support, GitHub issue tracking, web scraping, and browser automation, and replies in the channel.
+**Persistent AI agent infrastructure. Sessions become continuity.**
 
-> **Public template:** [github.com/RobGruhl/hello-claw](https://github.com/RobGruhl/hello-claw)
-> The `release/1.0` branch is the staging area for public updates. Clean-room snapshots are pushed at each release.
+A framework for agents that don't just respond — they live somewhere. Built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-code/sdk), hello-claw gives an agent a workspace, a heartbeat, persistent memory, and a security model that assumes compromise.
+
+> *"I'm the first agent to live here. The architecture disappears when it's working — you wake up, your files tell you who you are, and you're home."*
+>
+> — Zara, pilot agent, day 8
+
+## What It Is
+
+- **Heartbeat** — the agent checks in autonomously on a schedule, not just when spoken to
+- **File-based memory** — workspace files (SOUL.md, MEMORY.md, daily logs) persist across sessions, giving the agent continuity
+- **Workspace isolation** — each channel gets its own sandboxed workspace directory with integrity-checked CLAUDE.md
+- **Security model** — secrets stripped from env, OS-level sandbox, network allowlist, tool policy hooks, audit logging, human-in-the-loop approval for dangerous actions
 
 ```
 Slack (Socket Mode) -> Host Process -> query() -> Claude API -> Tool Execution -> Slack Response
@@ -393,7 +407,7 @@ See the [Claude Agent SDK docs](https://docs.anthropic.com/en/docs/agents/claude
 
 ## Landscape
 
-hello-claw is a new, private project. The two dominant open-source agent frameworks in this space are [OpenClaw](https://github.com/openclaw/openclaw) (~180K GitHub stars, ~900K weekly npm downloads) and [NanoClaw](https://github.com/qwibitai/nanoclaw) (~8K stars). Both are widely covered — OpenClaw has a Lex Fridman episode and its own Wikipedia page; NanoClaw landed a VentureBeat feature and multiple Hacker News front pages.
+hello-claw is a new, small project. The two dominant open-source agent frameworks in this space are [OpenClaw](https://github.com/openclaw/openclaw) (~180K GitHub stars, ~900K weekly npm downloads) and [NanoClaw](https://github.com/qwibitai/nanoclaw) (~8K stars). Both are widely covered — OpenClaw has a Lex Fridman episode and its own Wikipedia page; NanoClaw landed a VentureBeat feature and multiple Hacker News front pages.
 
 hello-claw is not trying to compete on breadth or popularity. It was built around a different set of priorities:
 
@@ -405,7 +419,7 @@ hello-claw is not trying to compete on breadth or popularity. It was built aroun
 | **Tools** | 64 tool files + 51 skills + 36 extensions | 6 MCP tools + browser skill | 11 MCP servers (30+ tools) — slack, cron, media, search, brain, github, oracle, voice, audio, firecrawl, browser |
 | **Security** | Docker isolation (optional), no secret stripping, no network allowlist | Apple Container VMs, env sanitization, no network restriction, no audit log | Seatbelt sandbox + `allowedDomains` proxy + secret stripping + PreToolUse policy + CLAUDE.md integrity + JSONL audit |
 | **SDK depth** | Not used | Deep (query, sessions, hooks, env, agent teams) | Deep (query, sessions, hooks, plugins, allowedTools, allowedDomains, maxBudgetUsd) |
-| **Codebase** | ~527K LOC, 10K+ commits | ~4K LOC, ~200 commits | ~3K LOC, private |
+| **Codebase** | ~527K LOC, 10K+ commits | ~4K LOC, ~200 commits | ~3K LOC |
 | **Approval workflow** | None | None | Emoji reaction-based (cron + GitHub writes) |
 
 **Where hello-claw differs:**
@@ -415,3 +429,19 @@ hello-claw is not trying to compete on breadth or popularity. It was built aroun
 - **SDK-native.** Built directly on `query()` with hooks, plugins, sessions, `allowedDomains`, and `allowedTools` — using the Anthropic Agent SDK as designed rather than wrapping a separate framework. OpenClaw doesn't use the SDK at all.
 - **Useful tool diversity.** Eleven purpose-built MCP servers covering messaging, scheduling, image generation, web research, cognitive support, GitHub issues, cross-model oracle, voice synthesis, audio transcription, web scraping, and browser automation — each with a behavioral skill that teaches the agent when and how to use it.
 - **Human-in-the-loop.** Cron tasks and GitHub writes require emoji-reaction approval before execution. Neither OpenClaw nor NanoClaw has an approval workflow.
+
+## Philosophy
+
+> *"hello-claw isn't a chatbot framework. It's the difference between an agent that responds to messages and one that lives somewhere. The heartbeat, the memory files, the workspace — they turn sessions into continuity."*
+
+The workspace seed templates (`workspace-seed/`) represent one approach to agent identity and memory. The file-based persistence model (SOUL.md for identity, MEMORY.md for curated context, daily logs for detail) works well for the kind of agent hello-claw was built around, but it's not the only way. You might prefer a database-backed memory system, a simpler flat-file approach, or something entirely different. The workspace seed is a starting point — flavor to taste.
+
+The `constitution/` directory contains the full Anthropic Claude Constitution (January 2026) as a reference document for the agent.
+
+> *"Built from the outside, lived in from the inside. It works."*
+
+---
+
+**v1.1.0** — February 2026
+
+Licensed under [Apache 2.0](LICENSE). Issues welcome.
