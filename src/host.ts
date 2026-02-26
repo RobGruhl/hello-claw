@@ -82,9 +82,6 @@ const userName = process.env.USER_NAME || 'the user';
 // --- Shared workspace (all channels use the same identity) ---
 const workDir = ensureWorkspace();
 
-// Per-channel pending compaction flags (set by /compact, consumed on next message)
-const pendingCompaction = new Set<string>();
-
 function readFileOrEmpty(filePath: string): string {
   try {
     return fs.readFileSync(filePath, 'utf-8').trim();
@@ -203,13 +200,6 @@ app.message(async ({ message, say }) => {
     await say(`:wastebasket: Session cleared. Starting fresh on your next message. Today: $${daily.totalUsd.toFixed(2)}`);
     return;
   }
-  if (trimmedText === '!compact') {
-    // Set a flag — compaction happens on the next real message
-    pendingCompaction.add(message.channel);
-    await say(`:compression: Compaction queued — your next message will compact the context before responding.`);
-    return;
-  }
-
   // Check pause state (allow !unpause through, block everything else)
   if (isPaused()) {
     await say(`_Agent is paused. Send \`!unpause\` to resume._`);
@@ -222,15 +212,12 @@ app.message(async ({ message, say }) => {
   try {
     // --- Session lifecycle evaluation ---
     const freshness = evaluateSessionFreshness(channelId);
-    let forceCompact = pendingCompaction.has(channelId);
-    pendingCompaction.delete(channelId);
 
     if (freshness.action === 'reset') {
       console.log(`[host] Session reset for ${channelId}: ${freshness.reason}`);
       clearSession(channelId);
-    } else if (freshness.action === 'compact' || forceCompact) {
-      const reason = forceCompact ? 'manual /compact' : (freshness.action === 'compact' ? freshness.reason : 'compact');
-      console.log(`[host] Forcing compaction for ${channelId}: ${reason}`);
+    } else if (freshness.action === 'compact') {
+      console.log(`[host] Forcing compaction for ${channelId}: ${freshness.reason}`);
       process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(COMPACT_THRESHOLD_PCT);
     }
 

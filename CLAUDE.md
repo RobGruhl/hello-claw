@@ -12,7 +12,7 @@ A Slack-connected autonomous agent built on the [Claude Agent SDK](https://githu
 Slack (Socket Mode) -> Host Process -> query() -> Claude API -> Tool Execution -> Slack Response
 ```
 
-- **Host process** (`src/host.ts`): Slack listener, `reaction_added` event handler for cron/GitHub approval, session lifecycle (daily reset, idle compaction), cost tracking, configurable budget enforcement, pause system, Slack commands (!pause, !unpause, !clear, !compact), secrets management, file metadata surfacing, timestamp injection, CLAUDE.md integrity checking, response delivery
+- **Host process** (`src/host.ts`): Slack listener, `reaction_added` event handler for cron/GitHub approval, session lifecycle (daily reset, idle compaction), cost tracking, configurable budget enforcement, pause system, Slack commands (!pause, !unpause, !clear), secrets management, file metadata surfacing, timestamp injection, CLAUDE.md integrity checking, response delivery
 - **System prompt** (`src/lib/system-prompt.ts`): Static system prompt passed to all `query()` calls — defines agent personality, tool awareness, and behavioral constraints
 - **MCP servers** (`src/mcp/`): In-process tools for Slack, cron, media, search, brain, GitHub, oracle, voice, audio, firecrawl, browser (run OUTSIDE sandbox)
 - **Skills** (`plugins/skills/`): Behavioral context loaded via SDK `plugins` option — text-only SKILL.md files that teach the agent when/how to use tools
@@ -183,7 +183,7 @@ ssh $MINI_HOST 'tail -f ~/Library/Logs/hello-claw.err.log'    # stderr
 
 - MCP servers run in the host process (not sandboxed) so they can call external APIs directly
 - Sandbox applies to Bash commands and child processes only
-- Sessions are per-channel, resumed via SDK's `resume` option, with lifecycle management: daily reset at 4am PT, idle >2h triggers compaction, !clear and !compact Slack commands
+- Sessions are per-channel, resumed via SDK's `resume` option, with lifecycle management: daily reset at 4am PT, idle >2h triggers compaction, !clear Slack command
 - Each channel gets its own workspace directory with its own CLAUDE.md for memory
 - PreToolUse hooks enforce safety policy BEFORE the OS sandbox sees the command
 - Scheduled tasks (cron) are always ephemeral (no session resume) — they run with the same hooks and integrity checks as interactive messages but never pollute interactive sessions
@@ -201,7 +201,7 @@ ssh $MINI_HOST 'tail -f ~/Library/Logs/hello-claw.err.log'    # stderr
 - Heartbeat supports configurable schedule presets via `HEARTBEAT_MODE`: `conservative` (4 beats/day, default), `standard` (8 beats/day), or `off` (disabled)
 - All cost-related settings are env-driven with conservative defaults — see `.env.example` for the full list
 - API proxy stabilizes cache by replacing random Bash UUIDs with deterministic ones per session and stripping WebFetch auth warning flicker
-- ToolSearch is enabled (`ENABLE_TOOL_SEARCH=true`) to reduce initial tool count and API costs
+- ToolSearch is disabled (`ENABLE_TOOL_SEARCH=false`) — the SDK defers all MCP tools with no per-tool control, so eager loading is used instead
 
 ## Cost Configuration
 
@@ -385,7 +385,6 @@ These are processed by host.ts when a user sends them in the Slack channel (usin
 - **`!pause`**: Pause the agent — it will stop responding to messages, heartbeats, and cron tasks until unpaused.
 - **`!unpause`**: Resume the agent after a pause. Shows today's accumulated cost.
 - **`!clear`**: Clear the current session for this channel. Next message starts a fresh session.
-- **`!compact`**: Queue context compaction. The next message will trigger autocompact at 1% threshold.
 
 ### Workspace sync (laptop side)
 

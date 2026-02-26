@@ -1,6 +1,6 @@
 {
   "name": "hello-claw",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A Slack-connected autonomous agent built on the Claude Agent SDK with in-process MCP servers, OS-level sandboxing, and human-in-the-loop approval workflows",
   "type": "module",
   "license": "Apache-2.0",
