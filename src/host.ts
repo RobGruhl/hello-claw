@@ -26,7 +26,7 @@ import { snapshotClaudeMd, checkClaudeMdIntegrity } from './lib/integrity.js';
 import { acquireChannelLock } from './lib/channel-lock.js';
 import { writeAuditEntry } from './lib/audit-log.js';
 import { buildSystemPrompt } from './lib/system-prompt.js';
-import { AGENT_MODEL, BETAS, MAX_BUDGET_USD, MAX_DAILY_BUDGET_USD } from './lib/config.js';
+import { AGENT_MODEL, BETAS, MAX_BUDGET_USD, MAX_DAILY_BUDGET_USD, COMPACT_THRESHOLD_PCT } from './lib/config.js';
 import { startHeartbeat, stopHeartbeat } from './lib/heartbeat.js';
 import { startApiProxy, stopApiProxy } from './lib/api-proxy.js';
 import { recordCost, getDailyCost, formatCostSummary } from './lib/cost-tracker.js';
@@ -231,7 +231,7 @@ app.message(async ({ message, say }) => {
     } else if (freshness.action === 'compact' || forceCompact) {
       const reason = forceCompact ? 'manual /compact' : (freshness.action === 'compact' ? freshness.reason : 'compact');
       console.log(`[host] Forcing compaction for ${channelId}: ${reason}`);
-      process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '1';
+      process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(COMPACT_THRESHOLD_PCT);
     }
 
     const sessionId = getSessionId(channelId);
@@ -268,93 +268,95 @@ app.message(async ({ message, say }) => {
     let numTurns = 0;
     let resultUsage: { inputTokens?: number; outputTokens?: number; cacheCreationTokens?: number; cacheReadTokens?: number } = {};
 
-    for await (const msg of query({
-      prompt,
-      options: {
-        model: AGENT_MODEL,
-        thinking: { type: 'adaptive' },
-        effort: 'max',
-        betas: ['code-execution-web-tools-2026-02-09' as any, ...BETAS],
-        maxBudgetUsd: MAX_BUDGET_USD,
-        systemPrompt: buildSystemPrompt(workDir, userName),
-        cwd: workDir,
-        resume: sessionId,
-        env: { ...process.env, ANTHROPIC_API_KEY: SECRETS.ANTHROPIC_API_KEY, ENABLE_TOOL_SEARCH: 'true' },
-        ...(sessionId ? {} : { plugins: [{ type: 'local' as const, path: path.resolve('plugins') }] }),
-        allowedTools: [
-          'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
-          'WebSearch', 'WebFetch',
-          'mcp__slack__*', 'mcp__cron__*', 'mcp__media__*', 'mcp__search__*',
-          'mcp__second-brain__*',
-          'mcp__github__*',
-          'mcp__oracle__*',
-          'mcp__voice__*',
-          'mcp__audio__*',
-          'mcp__firecrawl__*',
-          'mcp__browser__*',
-        ],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project'],
-        sandbox: {
-          enabled: true,
-          autoAllowBashIfSandboxed: true,
-          allowUnsandboxedCommands: false,
-          network: {
-            allowLocalBinding: false,
-            allowedDomains: [
-              'api.anthropic.com',
-              'statsig.anthropic.com',
-              'sentry.io',
-            ],
+    try {
+      for await (const msg of query({
+        prompt,
+        options: {
+          model: AGENT_MODEL,
+          thinking: { type: 'adaptive' },
+          effort: 'max',
+          betas: ['code-execution-web-tools-2026-02-09' as any, ...BETAS],
+          maxBudgetUsd: MAX_BUDGET_USD,
+          maxTurns: 200,
+          systemPrompt: buildSystemPrompt(workDir, userName),
+          cwd: workDir,
+          resume: sessionId,
+          env: { ...process.env, ANTHROPIC_API_KEY: SECRETS.ANTHROPIC_API_KEY, ENABLE_TOOL_SEARCH: 'false' },
+          ...(sessionId ? {} : { plugins: [{ type: 'local' as const, path: path.resolve('plugins') }] }),
+          allowedTools: [
+            'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
+            'WebSearch', 'WebFetch',
+            'mcp__slack__*', 'mcp__cron__*', 'mcp__media__*', 'mcp__search__*',
+            'mcp__second-brain__*',
+            'mcp__github__*',
+            'mcp__oracle__*',
+            'mcp__voice__*',
+            'mcp__audio__*',
+            'mcp__firecrawl__*',
+            'mcp__browser__*',
+          ],
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
+          settingSources: ['project'],
+          sandbox: {
+            enabled: true,
+            autoAllowBashIfSandboxed: true,
+            allowUnsandboxedCommands: false,
+            network: {
+              allowLocalBinding: false,
+              allowedDomains: [
+                'api.anthropic.com',
+                'statsig.anthropic.com',
+                'sentry.io',
+              ],
+            },
+          },
+          mcpServers: {
+            slack: slackMcp,
+            cron: cronMcp,
+            media: mediaMcp,
+            search: searchMcp,
+            'second-brain': brainMcp,
+            github: githubMcp,
+            oracle: oracleMcp,
+            voice: voiceMcp,
+            audio: audioMcp,
+            firecrawl: firecrawlMcp,
+            browser: browserMcp,
+          },
+          hooks: {
+            PreToolUse: [{ hooks: [createToolPolicy(workDir, channelId)] }],
+            PostToolUse: [{ hooks: [createAuditHook(channelId)] }],
           },
         },
-        mcpServers: {
-          slack: slackMcp,
-          cron: cronMcp,
-          media: mediaMcp,
-          search: searchMcp,
-          'second-brain': brainMcp,
-          github: githubMcp,
-          oracle: oracleMcp,
-          voice: voiceMcp,
-          audio: audioMcp,
-          firecrawl: firecrawlMcp,
-          browser: browserMcp,
-        },
-        hooks: {
-          PreToolUse: [{ hooks: [createToolPolicy(workDir, channelId)] }],
-          PostToolUse: [{ hooks: [createAuditHook(channelId)] }],
-        },
-      },
-    })) {
-      const sub = 'subtype' in msg ? ` subtype=${(msg as any).subtype}` : '';
-      console.log(`[host:sdk] type=${msg.type}${sub}`);
-      if (msg.type === 'system' && msg.subtype === 'init') {
-        newSessionId = msg.session_id;
-      }
-      if (msg.type === 'result') {
-        const resultMsg = msg as any;
-        totalCostUsd = resultMsg.total_cost_usd || 0;
-        numTurns = resultMsg.num_turns || 0;
-        if (resultMsg.usage) {
-          resultUsage = {
-            inputTokens: resultMsg.usage.inputTokens,
-            outputTokens: resultMsg.usage.outputTokens,
-            cacheCreationTokens: resultMsg.usage.cacheCreationInputTokens,
-            cacheReadTokens: resultMsg.usage.cacheReadInputTokens,
-          };
+      })) {
+        const sub = 'subtype' in msg ? ` subtype=${(msg as any).subtype}` : '';
+        console.log(`[host:sdk] type=${msg.type}${sub}`);
+        if (msg.type === 'system' && msg.subtype === 'init') {
+          newSessionId = msg.session_id;
         }
-        if ('result' in resultMsg && resultMsg.result) {
-          result = resultMsg.result as string;
+        if (msg.type === 'result') {
+          const resultMsg = msg as any;
+          totalCostUsd = resultMsg.total_cost_usd || 0;
+          numTurns = resultMsg.num_turns || 0;
+          if (resultMsg.usage) {
+            resultUsage = {
+              inputTokens: resultMsg.usage.inputTokens,
+              outputTokens: resultMsg.usage.outputTokens,
+              cacheCreationTokens: resultMsg.usage.cacheCreationInputTokens,
+              cacheReadTokens: resultMsg.usage.cacheReadInputTokens,
+            };
+          }
+          if ('result' in resultMsg && resultMsg.result) {
+            result = resultMsg.result as string;
+          }
         }
       }
+    } finally {
+      delete process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
     }
 
     if (newSessionId) saveSessionId(channelId, newSessionId);
-
-    // Clean up compaction override
-    delete process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
 
     // Update session timestamp
     touchSession(channelId);

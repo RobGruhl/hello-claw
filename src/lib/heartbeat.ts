@@ -179,10 +179,11 @@ Full protocol in HEARTBEAT.md if needed.
         effort: 'max',
         betas: ['code-execution-web-tools-2026-02-09' as any, ...BETAS],
         maxBudgetUsd: MAX_BUDGET_USD,
+        maxTurns: 50,
         systemPrompt: buildSystemPrompt(opts.workDir, opts.userName),
         cwd: opts.workDir,
         resume: undefined,
-        env: { ...process.env, ANTHROPIC_API_KEY: opts.anthropicApiKey, ENABLE_TOOL_SEARCH: 'true' },
+        env: { ...process.env, ANTHROPIC_API_KEY: opts.anthropicApiKey, ENABLE_TOOL_SEARCH: 'false' },
         plugins: [{ type: 'local' as const, path: path.resolve('plugins') }],
         allowedTools: [
           'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',

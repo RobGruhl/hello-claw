@@ -258,6 +258,7 @@ async function executeTask(task: ScheduledTask, app: App, anthropicApiKey: strin
         effort: 'max',
         betas: [...BETAS] as any,
         maxBudgetUsd: MAX_BUDGET_USD,
+        maxTurns: 200,
         systemPrompt: buildSystemPrompt(workDir, userName),
         cwd: workDir,
         resume: sessionId,
