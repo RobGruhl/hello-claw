@@ -11,8 +11,3 @@ export const MAX_DAILY_BUDGET_USD = parseFloat(process.env.MAX_DAILY_BUDGET_USD 
 
 // Heartbeat schedule preset: 'conservative' (4/day), 'standard' (8/day), 'off' (disabled).
 export const HEARTBEAT_MODE = process.env.HEARTBEAT_MODE || 'conservative';
-
-// Autocompact threshold (% of context window). Compacted summaries are ~7K tokens;
-// system prompt + tools consume ~90K tokens of the 180K window. At 50%, the threshold
-// is ~90K message tokens — well above the ~7K summary, so the SDK compacts once and stops.
-export const COMPACT_THRESHOLD_PCT = 50;

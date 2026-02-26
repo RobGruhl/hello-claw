@@ -26,7 +26,7 @@ import { snapshotClaudeMd, checkClaudeMdIntegrity } from './lib/integrity.js';
 import { acquireChannelLock } from './lib/channel-lock.js';
 import { writeAuditEntry } from './lib/audit-log.js';
 import { buildSystemPrompt } from './lib/system-prompt.js';
-import { AGENT_MODEL, BETAS, MAX_BUDGET_USD, MAX_DAILY_BUDGET_USD, COMPACT_THRESHOLD_PCT } from './lib/config.js';
+import { AGENT_MODEL, BETAS, MAX_BUDGET_USD, MAX_DAILY_BUDGET_USD } from './lib/config.js';
 import { startHeartbeat, stopHeartbeat } from './lib/heartbeat.js';
 import { startApiProxy, stopApiProxy } from './lib/api-proxy.js';
 import { recordCost, getDailyCost, formatCostSummary } from './lib/cost-tracker.js';
@@ -216,9 +216,6 @@ app.message(async ({ message, say }) => {
     if (freshness.action === 'reset') {
       console.log(`[host] Session reset for ${channelId}: ${freshness.reason}`);
       clearSession(channelId);
-    } else if (freshness.action === 'compact') {
-      console.log(`[host] Forcing compaction for ${channelId}: ${freshness.reason}`);
-      process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(COMPACT_THRESHOLD_PCT);
     }
 
     const sessionId = getSessionId(channelId);
@@ -255,8 +252,7 @@ app.message(async ({ message, say }) => {
     let numTurns = 0;
     let resultUsage: { inputTokens?: number; outputTokens?: number; cacheCreationTokens?: number; cacheReadTokens?: number } = {};
 
-    try {
-      for await (const msg of query({
+    for await (const msg of query({
         prompt,
         options: {
           model: AGENT_MODEL,
@@ -339,14 +335,9 @@ app.message(async ({ message, say }) => {
           }
         }
       }
-    } finally {
-      delete process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
-    }
 
-    if (newSessionId) saveSessionId(channelId, newSessionId);
-
-    // Update session timestamp
     touchSession(channelId);
+    if (newSessionId) saveSessionId(channelId, newSessionId);
 
     // Check CLAUDE.md integrity — restore if tampered
     checkClaudeMdIntegrity(claudeMdPath, claudeMdSnapshot, channelId);
