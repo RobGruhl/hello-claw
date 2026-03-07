@@ -60,5 +60,6 @@ All tools are prefixed `mcp__search__`.
 - Both tools return AI-synthesized answers — note this when citing
 - `ask` includes citations — always surface them to the user
 - If using `deep_research`, acknowledge the wait: "Let me do a thorough search — this takes 30-60 seconds"
+- **`deep_research` output can run 10-30K chars.** If you don't need every word in your context (you usually don't), delegate the call to the `deep-research` sub-agent via the Task tool — it runs the query in isolation and returns the key findings quoted verbatim with citations preserved. See the delegation skill.
 - Don't over-search — if `ask` gave a good answer, don't follow up with `deep_research` for marginal improvement
 - Citations include source URLs — use WebFetch on individual citations when you need full article text, primary source verification, or deeper context

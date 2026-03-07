@@ -112,10 +112,10 @@ Snapshot: /path/to/browser/snapshot.txt (12345 chars, 42 interactive refs)
 
 Browsing is expensive — each page fetch burns tokens on content extraction and analysis.
 
-- **Prefer subagent delegation** when reading multiple pages or doing research. Use the Task tool to spawn a cheaper subagent (Sonnet) for browsing work, then summarize findings.
-- **Direct browsing is fine** for single-page quick lookups where you already know the URL.
+- **Delegate large fetches to `web-curator`.** When the raw page is going to be big (long docs, dense HTML) or you need to click through multiple pages, spawn the `web-curator` sub-agent via the Task tool. It fetches in an isolated Sonnet context and returns 2–15K chars of verbatim excerpts with URLs — not a summary, the actual chunks you need. See the delegation skill for the full decision tree.
+- **Direct browsing is fine** for single-page quick lookups where you know the URL and want the whole thing.
 - **Don't scrape speculatively.** Only fetch pages you're confident will have the answer.
-- **Summarize aggressively.** Don't pass raw scraped content to the user — extract what's relevant.
+- **Extract what's relevant.** Don't pass raw scraped content to the user.
 
 ## Communication Values
 

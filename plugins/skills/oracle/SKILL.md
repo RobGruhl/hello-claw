@@ -59,6 +59,12 @@ the oracle needs to give a useful answer.
 | User seems unsure or curious | Ask first, explain cost/wait | Let them decide if it's worth 5-15 min |
 | Cron / scheduled task | Not available | Oracle is interactive-only |
 
+## Context Protection
+
+Oracle responses routinely run 10K+ chars. If you want the oracle's take but don't need the full essay sitting in your session, delegate via the `deep-research` sub-agent (Task tool) — it calls the oracle in an isolated context and returns the core findings quoted verbatim, preamble and hedging dropped. See the delegation skill.
+
+Call oracle directly when you actually want the whole thing in context — e.g., the user asked for it specifically and will want to discuss it point by point.
+
 ## Communication Values
 
 - **Warn about wait time before calling.** Always tell the user: "This will take

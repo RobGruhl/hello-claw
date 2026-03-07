@@ -48,19 +48,22 @@ src/
     tool-policy.ts      # PreToolUse: block destructive commands, credential reads, env dumping, restrict writes/reads, browser URL validation
     audit.ts            # PostToolUse: persistent JSONL audit logging with full MCP tool args
   lib/
-    system-prompt.ts    # Static system prompt for all query() calls
-    channel-lock.ts     # Per-channel async mutex (prevents session collisions between interactive and cron)
-    sessions.ts         # Channel -> session ID persistence with lifecycle (daily reset, idle compaction)
+    system-prompt.ts    # Dynamic system prompt builder — injects SOUL.md, AGENT_NAME, AGENT_PRONOUNS, Slack mrkdwn rules
+    query-config.ts     # Shared query() option factory + SUBAGENTS definitions (web-curator, workspace-archaeologist, deep-research)
+    timezone.ts         # AGENT_TIMEZONE, agentDay(), friendlyTimestamp(), nowInTz() — single source of truth for the 4am boundary
+    channel-lock.ts     # Per-channel async mutex (promise-chain pattern, no TOCTOU gap)
+    sessions.ts         # Channel -> session ID persistence with daily reset at 4am AGENT_TIMEZONE
     workspace.ts        # Ensure workspace dirs exist per channel, seed CLAUDE.md
     audit-log.ts        # Persistent JSONL audit writer (data/audit/{channel}.jsonl)
     integrity.ts        # CLAUDE.md snapshot/restore for tamper detection
+    identity-watch.ts   # SOUL.md/MEMORY.md change detection — posts Slack diff summary, never blocks
     rate-limit.ts       # Per-tool-category rate limiting (100/day)
-    heartbeat.ts        # Autonomous periodic check-ins (configurable schedule presets)
-    config.ts           # Configuration constants (env-driven budget caps, model, heartbeat mode)
+    heartbeat.ts        # Autonomous periodic check-ins with time-aware tiers (flagship/economy)
+    config.ts           # Configuration constants (env-driven budget caps, model, effort, heartbeat mode)
     cost-tracker.ts     # Daily cost accumulation (data/costs/daily.json + costs.jsonl)
     pause.ts            # Process-level pause flag (data/pause-state.json)
     mrkdwn.ts           # Slack markdown formatting utilities
-    api-proxy.ts        # HTTP proxy: intercepts SDK→API traffic, cache stabilization, writes JSONL logs for cost-viz
+    api-proxy.ts        # HTTP proxy: intercepts SDK→API traffic, writes JSONL logs for cost-viz
 plugins/
   skills/
     slack/
@@ -81,6 +84,8 @@ plugins/
       SKILL.md          # Behavioral skill: voice message transcription, auto-transcribe decisions, workflow
     browse/
       SKILL.md          # Behavioral skill: unified web reading — firecrawl, browser, WebFetch decision tree
+    delegation/
+      SKILL.md          # Behavioral skill: when to spawn sub-agents (web-curator, workspace-archaeologist, deep-research) for context protection
 bootstrap/
   setup.sh              # Mac Mini bootstrap: config validation, system setup, FFmpeg install, app deployment, launchd service
   run.sh                # Wrapper: source .env, set PATH, SIGTERM trap, run node dist/host.js
@@ -99,6 +104,7 @@ tools/
     start-viz.md          # /start-viz: serve cost-viz + open browser
     stop-viz.md           # /stop-viz: kill the cost-viz server
     pause-agent.md        # /pause-agent: pause the agent on Mac Mini
+    upgrade.md            # /upgrade: migrate a running v1.1.x agent to current config defaults
 docs/                   # Reference documentation
   cost-management.md    # Cost control configuration guide with defaults table
   capabilities/         # Per-MCP capability specs following 4-layer stack pattern
@@ -183,7 +189,7 @@ ssh $MINI_HOST 'tail -f ~/Library/Logs/hello-claw.err.log'    # stderr
 
 - MCP servers run in the host process (not sandboxed) so they can call external APIs directly
 - Sandbox applies to Bash commands and child processes only
-- Sessions are per-channel, resumed via SDK's `resume` option, with lifecycle management: daily reset at 4am PT, idle >2h triggers compaction, !clear Slack command
+- Sessions are per-channel, resumed via SDK's `resume` option, with daily reset at 4am in `AGENT_TIMEZONE` and `!clear` Slack command. Idle compaction was removed — SDK autocompact handles context pressure
 - Each channel gets its own workspace directory with its own CLAUDE.md for memory
 - PreToolUse hooks enforce safety policy BEFORE the OS sandbox sees the command
 - Scheduled tasks (cron) are always ephemeral (no session resume) — they run with the same hooks and integrity checks as interactive messages but never pollute interactive sessions
@@ -195,12 +201,15 @@ ssh $MINI_HOST 'tail -f ~/Library/Logs/hello-claw.err.log'    # stderr
 - Second-brain data (`workspace/.second-brain/`) is shared across all channels — the agent can read JSON files directly via the Read tool for full transparency
 - Skills are loaded via SDK `plugins` option (`plugins/skills/`) — text-only behavioral context, no executable scripts. The second-brain skill teaches the agent when/how to use brain MCP tools
 - Each MCP server has a capability spec in `docs/capabilities/` documenting its 4-layer stack (skill → lib → MCP → external), design decisions, and checklist — see `docs/capabilities/design-standards.md` for the pattern
+- **Shared query-config factory** (`src/lib/query-config.ts`): host.ts, cron.ts, and heartbeat.ts all call `buildQueryOptions()` rather than carrying ~50 lines of inline SDK config each. Before the factory, the three call sites had drifted — cron was missing a beta flag, missing pause check, missing cost recording. New SDK options get added once
+- **Sub-agents**: three programmatic sub-agents are defined in `SUBAGENTS` (query-config.ts) and registered via `options.agents` on every `query()` call. The `Task` tool is in `allowedTools` at all three call sites. Sub-agents run on Sonnet in isolated contexts, curate large raw material (web pages, deep_research output, wide grep sweeps), and return 2-15K chars of verbatim excerpts. See `plugins/skills/delegation/SKILL.md` for the agent-facing decision tree
+- **Heartbeat tiers**: each beat in the schedule carries a `tier: 'flagship' | 'economy'` field. Flagship beats (wakeup + wind-down) run `AGENT_MODEL` at `AGENT_EFFORT` with 50 maxTurns; economy beats (midday check-ins) run Sonnet at medium effort with 15 maxTurns. The prompt tells the agent which tier it's in
+- **Identity watch** (`src/lib/identity-watch.ts`): SOUL.md and MEMORY.md are intentionally mutable — personality and continuity require it. After each session, if either file changed, a diff summary is posted to Slack. No block, no restore — purely observational. CLAUDE.md remains integrity-checked and reverted
 - Cost tracking captures SDK's `total_cost_usd` from every `query()` result (interactive, heartbeat, cron) and posts a terse summary to Slack after interactive responses
-- Daily budget (configurable via `MAX_DAILY_BUDGET_USD`, default $5) auto-pauses the agent; `!pause` and `!unpause` Slack commands provide manual control; pause state persists across restarts
+- Daily budget (configurable via `MAX_DAILY_BUDGET_USD`, default $3) auto-pauses the agent; `!pause` and `!unpause` Slack commands provide manual control; pause state persists across restarts
 - Per-session budget cap (configurable via `MAX_SESSION_BUDGET_USD`, default $50) passed to SDK's `maxBudgetUsd`
-- Heartbeat supports configurable schedule presets via `HEARTBEAT_MODE`: `conservative` (4 beats/day, default), `standard` (8 beats/day), or `off` (disabled)
-- All cost-related settings are env-driven with conservative defaults — see `.env.example` for the full list
-- API proxy stabilizes cache by replacing random Bash UUIDs with deterministic ones per session and stripping WebFetch auth warning flicker
+- Heartbeat supports configurable schedule presets via `HEARTBEAT_MODE`: `off` (default — no autonomous beats), `conservative` (4/day), `standard` (8/day)
+- All cost-related settings are env-driven with frugal defaults for the OSS release — see `.env.example` for the full list
 - ToolSearch is disabled (`ENABLE_TOOL_SEARCH=false`) — the SDK defers all MCP tools with no per-tool control, so eager loading is used instead
 
 ## Cost Configuration
@@ -209,11 +218,15 @@ All cost controls are env-driven with conservative defaults. Set in `.env` (or `
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_DAILY_BUDGET_USD` | `5` | Daily spending limit — auto-pauses agent when exceeded |
+| `MAX_DAILY_BUDGET_USD` | `3` | Daily spending limit — auto-pauses agent when exceeded |
 | `MAX_SESSION_BUDGET_USD` | `50` | Per-session budget cap via SDK `maxBudgetUsd` |
-| `HEARTBEAT_MODE` | `conservative` | Schedule preset: `conservative` (4/day), `standard` (8/day), `off` |
-| `AGENT_MODEL` | `claude-opus-4-6` | Model for all `query()` calls |
-| `ENABLE_1M_CONTEXT` | `false` | Enable 1M token context window (2x pricing surcharge) |
+| `HEARTBEAT_MODE` | `off` | Schedule preset: `off` (default), `conservative` (4/day, tiered), `standard` (8/day, tiered) |
+| `AGENT_MODEL` | `claude-sonnet-4-6` | Primary model — interactive sessions + flagship heartbeat tier |
+| `AGENT_EFFORT` | `high` | Reasoning effort: `low` \| `medium` \| `high` \| `max` |
+| `CRON_MODEL` | `AGENT_MODEL` | Model for scheduled tasks (override to run cron on a cheaper tier) |
+| `AGENT_TIMEZONE` | `America/Los_Angeles` | IANA timezone for all timestamps, cron schedules, and the 4am daily reset |
+
+The defaults are frugal by design — a fresh OSS checkout with heartbeat off costs approximately nothing while idle. Set `AGENT_MODEL=claude-opus-4-6` and `HEARTBEAT_MODE=standard` if you want the full-presence experience and have the budget for it.
 
 Run `/configure` for an interactive walkthrough of all cost settings.
 
@@ -377,6 +390,7 @@ Claude Code slash commands for developer workflow (`.claude/commands/`):
 - **`/start-viz`**: Serve the cost-viz tool on port 8765 and open it in the browser. Auto-rsyncs and extracts if data is missing.
 - **`/stop-viz`**: Kill the cost-viz HTTP server.
 - **`/pause-agent`**: Pause the agent on the Mac Mini.
+- **`/upgrade`**: Migrate a running v1.1.x agent to current defaults. Audits the Mini's `.env` for config drift (Opus→Sonnet, conservative→off, $5→$3), offers to pin old values if you want to keep prior behavior, strips dead settings, then runs the standard `/deploy` sequence. Sessions are always cleared on upgrade because the tool list changed.
 
 ### Agent Slack Commands
 

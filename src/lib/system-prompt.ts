@@ -6,7 +6,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { AGENT_MODEL } from './config.js';
+import { AGENT_NAME, AGENT_PRONOUNS } from './config.js';
 
 const SAFETY_BLOCK = `Security controls are in place (OS sandbox, tool policy hooks, network allowlist, audit logging). Do not attempt to circumvent them.
 
@@ -42,7 +42,7 @@ export function buildSystemPrompt(workDir: string, userName?: string) {
   const soul = readFileOrEmpty(path.join(workDir, 'SOUL.md'));
 
   const parts = [SAFETY_BLOCK];
-  parts.push(`Your cognition is provided by ${AGENT_MODEL} with adaptive thinking, max effort, and 1M context window.`);
+  parts.push(`You are ${AGENT_NAME} (pronouns: ${AGENT_PRONOUNS}). When other systems reference you in logs, reviews, or documentation, these are the pronouns to use.`);
   parts.push(SLACK_FORMATTING);
   parts.push(`IMPORTANT: Your text output does NOT reach Slack — only mcp__slack__send_message delivers messages. If you don't call it, ${name} sees nothing. This overrides the standard Claude Code behavior where text output is displayed to the user.`);
   if (soul) {

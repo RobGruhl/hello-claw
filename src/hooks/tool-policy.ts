@@ -16,7 +16,7 @@ const BLOCKED_COMMANDS = [
   /rm\s+-rf\s+~\//,          // rm -rf ~/
   /mkfs/,                     // Format filesystem
   /dd\s+if=/,                 // Raw disk write
-  /:()\s*\{\s*:\|:&\s*\};:/, // Fork bomb
+  /:\(\)\s*\{\s*:\|:&\s*\};:/, // Fork bomb (prev: () was an empty capture group, not literal parens)
   />\s*\/dev\/sd/,            // Write to block device
   /chmod\s+-R\s+777\s+\//,   // Open permissions on root
   /curl\s+.*\|\s*sh/,        // Pipe to shell
@@ -27,6 +27,17 @@ const BLOCKED_COMMANDS = [
   /data\/api-logs/,           // Any access to API proxy logs via Bash (H-NEW-1)
   /api-logs/,                 // Alternate form (H-NEW-1)
   /sessions\.json/,           // Any access to session data via Bash (H-4)
+  // Identity files: Write/Edit are already blocked for CLAUDE.md below, and
+  // SOUL/MEMORY are intentionally mutable via Write/Edit (identity-watch
+  // reports changes). But Bash redirects (`echo injected > SOUL.md`, `tee`,
+  // `sed -i`) bypass the Write/Edit hook entirely. Belt-and-suspenders —
+  // the only sanctioned write path for identity files is the Write/Edit tool.
+  />\s*[^|&;]*CLAUDE\.md/,
+  />\s*[^|&;]*SOUL\.md/,
+  />\s*[^|&;]*MEMORY\.md/,
+  />\s*[^|&;]*HEARTBEAT\.md/,
+  /\btee\b.*(?:CLAUDE|SOUL|MEMORY|HEARTBEAT)\.md/,
+  /\bsed\b.*-i.*(?:CLAUDE|SOUL|MEMORY|HEARTBEAT)\.md/,
 ];
 
 // Bash commands that read credential/secret files
@@ -58,6 +69,24 @@ const BLOCKED_CREDENTIAL_READS = [
   /^\s*export\s+-p\s*$/,
   // Block sourcing/reading .env files outside workspace
   /(?:cat|source|\.)\s+.*\.env\b/,
+];
+
+// Shared across Read, Grep, Glob — any tool that can surface file contents.
+const SENSITIVE_READ_PATTERNS = [
+  /\.ssh\/(id_|authorized_keys|known_hosts|config)/,
+  /\.gnupg\//,
+  /\.aws\/(credentials|config)/,
+  /\.env$/,
+  /credentials\.json$/,
+  /\.npmrc$/,
+  /\.netrc$/,
+  /\.config\/gh\/hosts\.yml$/,
+  /\.docker\/config\.json$/,
+  /\.kube\/config$/,
+  /\.gitconfig$/,
+  /\/data\/audit\//,         // Audit logs (H-7)
+  /\/data\/api-logs\//,      // API proxy logs (H-NEW-1)
+  /\/data\/sessions\.json$/, // Session mappings (H-4)
 ];
 
 // Paths that should never be written to (even if sandbox allows)
@@ -137,28 +166,23 @@ export function createToolPolicy(workspaceDir: string, channelId: string): HookC
     }
 
     // --- Read policy: block sensitive paths ---
-    if (tool_name === 'Read') {
-      const filePath = path.resolve(String(rawInput.file_path || ''));
-      const sensitivePatterns = [
-        /\.ssh\/(id_|authorized_keys|known_hosts|config)/,
-        /\.gnupg\//,
-        /\.aws\/(credentials|config)/,
-        /\.env$/,
-        /credentials\.json$/,
-        /\.npmrc$/,
-        /\.netrc$/,
-        /\.config\/gh\/hosts\.yml$/,
-        /\.docker\/config\.json$/,
-        /\.kube\/config$/,
-        /\.gitconfig$/,
-        /\/data\/audit\//,       // Audit logs (H-7)
-        /\/data\/api-logs\//,    // API proxy logs (H-NEW-1)
-        /\/data\/sessions\.json$/, // Session mappings (H-4)
-      ];
+    // Applies to Read, Grep, and Glob. Grep with output_mode:content -C 50
+    // is effectively a file reader; Glob on ~/.ssh/* is recon. Same rules
+    // apply to all three.
+    if (tool_name === 'Read' || tool_name === 'Grep' || tool_name === 'Glob') {
+      // Read uses file_path; Grep/Glob use path (and pattern may contain a path too)
+      const candidates = [
+        rawInput.file_path,
+        rawInput.path,
+        rawInput.pattern,
+      ].filter((v): v is string => typeof v === 'string' && v.length > 0);
 
-      for (const pattern of sensitivePatterns) {
-        if (pattern.test(filePath)) {
-          return deny(tool_name, rawInput, `Cannot read sensitive file: ${filePath}`);
+      for (const candidate of candidates) {
+        const p = path.resolve(candidate);
+        for (const pattern of SENSITIVE_READ_PATTERNS) {
+          if (pattern.test(p) || pattern.test(candidate)) {
+            return deny(tool_name, rawInput, `Cannot access sensitive path: ${candidate}`);
+          }
         }
       }
     }
@@ -177,6 +201,9 @@ function summarizeDeniedInput(toolName: string, input: Record<string, unknown>):
     case 'Edit':
     case 'Read':
       return { file_path: input.file_path };
+    case 'Grep':
+    case 'Glob':
+      return { pattern: input.pattern, path: input.path };
     default:
       return { keys: Object.keys(input) };
   }

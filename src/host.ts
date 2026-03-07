@@ -18,15 +18,15 @@ import { createVoiceMcp } from './mcp/voice.js';
 import { createAudioMcp } from './mcp/audio.js';
 import { createFirecrawlMcp } from './mcp/firecrawl.js';
 import { createBrowserMcp } from './mcp/browser.js';
-import { createToolPolicy } from './hooks/tool-policy.js';
-import { createAuditHook } from './hooks/audit.js';
 import { getSessionId, saveSessionId, clearSession, touchSession, evaluateSessionFreshness } from './lib/sessions.js';
 import { ensureWorkspace } from './lib/workspace.js';
 import { snapshotClaudeMd, checkClaudeMdIntegrity } from './lib/integrity.js';
+import { snapshotIdentity, reportIdentityChanges } from './lib/identity-watch.js';
 import { acquireChannelLock } from './lib/channel-lock.js';
 import { writeAuditEntry } from './lib/audit-log.js';
-import { buildSystemPrompt } from './lib/system-prompt.js';
-import { AGENT_MODEL, BETAS, MAX_BUDGET_USD, MAX_DAILY_BUDGET_USD } from './lib/config.js';
+import { buildQueryOptions } from './lib/query-config.js';
+import { AGENT_MODEL, AGENT_NAME, MAX_DAILY_BUDGET_USD } from './lib/config.js';
+import { AGENT_TIMEZONE, friendlyTimestamp } from './lib/timezone.js';
 import { startHeartbeat, stopHeartbeat } from './lib/heartbeat.js';
 import { startApiProxy, stopApiProxy } from './lib/api-proxy.js';
 import { recordCost, getDailyCost, formatCostSummary } from './lib/cost-tracker.js';
@@ -75,8 +75,7 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '';
 process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
 process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = '1500000'; // 25 min for oracle (background mode takes 5-15 min)
 
-// --- Agent and human identity ---
-const agentName = process.env.AGENT_NAME || 'Agent';
+// --- Human identity ---
 const userName = process.env.USER_NAME || 'the user';
 
 // --- Shared workspace (all channels use the same identity) ---
@@ -93,19 +92,16 @@ function readFileOrEmpty(filePath: string): string {
 function buildSessionBanner(channelId: string, sessionType: 'fresh' | 'resumed'): string {
   const now = new Date();
   const datePart = now.toLocaleDateString('en-US', {
-    timeZone: 'America/Los_Angeles',
+    timeZone: AGENT_TIMEZONE,
     weekday: 'long', month: 'long', day: 'numeric',
   });
   const timePart = now.toLocaleTimeString('en-US', {
-    timeZone: 'America/Los_Angeles',
-    hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: AGENT_TIMEZONE,
+    hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
   });
 
-  const greeting = sessionType === 'fresh'
-    ? `Welcome back ${agentName}, it's ${datePart} at ${timePart} Pacific Time. This is a fresh session.`
-    : `Welcome back ${agentName}, it's ${datePart} at ${timePart} Pacific Time. Resuming your previous session.`;
-
-  return `[SESSION CONTEXT]\n${greeting}\nYour cognition is provided by ${AGENT_MODEL} with adaptive thinking, max effort, and 200K context window.\nChannel: ${channelId}`;
+  const state = sessionType === 'fresh' ? 'This is a fresh session.' : 'Resuming your previous session.';
+  return `[SESSION CONTEXT]\nWelcome back ${AGENT_NAME}, it's ${datePart} at ${timePart}. ${state}\nCognition: ${AGENT_MODEL} with adaptive thinking.\nChannel: ${channelId}`;
 }
 
 const app = new App({
@@ -117,28 +113,50 @@ const app = new App({
 
 /** Extract full text from Slack rich_text blocks (message.blocks).
  *  Slack's modern clients send messages with blocks; the top-level `text`
- *  field can be a truncated plain-text fallback with a trailing "…". */
+ *  field can be a truncated plain-text fallback with a trailing "…".
+ *
+ *  Block structure is recursive:
+ *    rich_text -> [rich_text_section | rich_text_list | rich_text_quote | rich_text_preformatted]
+ *    rich_text_list -> [rich_text_section]  (list items are sections, not leaves)
+ *    rich_text_section -> [text | link | emoji | user | channel]  (leaves)
+ *
+ *  The old implementation was one level too shallow — it treated a list's
+ *  children as leaves, so list item text was silently dropped and only a
+ *  trailing newline survived. */
+function extractLeaf(el: any): string {
+  if (el.type === 'text') return el.text ?? '';
+  if (el.type === 'link') return el.text ?? el.url ?? '';
+  if (el.type === 'emoji') return el.unicode ? String.fromCodePoint(...el.unicode.split('-').map((h: string) => parseInt(h, 16))) : `:${el.name}:`;
+  if (el.type === 'user') return `<@${el.user_id}>`;
+  if (el.type === 'channel') return `<#${el.channel_id}>`;
+  return '';
+}
+
+function walkRichTextContainer(container: any, parts: string[]): void {
+  if (!Array.isArray(container?.elements)) return;
+  for (const child of container.elements) {
+    if (child.type === 'rich_text_section' || child.type === 'rich_text_quote' || child.type === 'rich_text_preformatted') {
+      for (const leaf of child.elements || []) parts.push(extractLeaf(leaf));
+      parts.push('\n');
+    } else if (child.type === 'rich_text_list') {
+      // List items are themselves sections — recurse one more level.
+      walkRichTextContainer(child, parts);
+    } else {
+      // Direct leaf (shouldn't happen at this level, but be tolerant)
+      parts.push(extractLeaf(child));
+    }
+  }
+}
+
 function extractTextFromBlocks(blocks: any[] | undefined): string | null {
   if (!blocks || !Array.isArray(blocks)) return null;
   const parts: string[] = [];
   for (const block of blocks) {
-    if (block.type !== 'rich_text' || !Array.isArray(block.elements)) continue;
-    for (const section of block.elements) {
-      if (!Array.isArray(section.elements)) continue;
-      for (const el of section.elements) {
-        if (el.type === 'text') parts.push(el.text ?? '');
-        else if (el.type === 'link') parts.push(el.text ?? el.url ?? '');
-        else if (el.type === 'emoji') parts.push(el.unicode ? String.fromCodePoint(...el.unicode.split('-').map((h: string) => parseInt(h, 16))) : `:${el.name}:`);
-        else if (el.type === 'user') parts.push(`<@${el.user_id}>`);
-        else if (el.type === 'channel') parts.push(`<#${el.channel_id}>`);
-      }
-      // rich_text_list / rich_text_preformatted / rich_text_quote are siblings of rich_text_section
-      if (section.type === 'rich_text_list' || section.type === 'rich_text_quote' || section.type === 'rich_text_preformatted') {
-        parts.push('\n');
-      }
-    }
+    if (block.type !== 'rich_text') continue;
+    walkRichTextContainer(block, parts);
   }
-  return parts.length > 0 ? parts.join('') : null;
+  const joined = parts.join('').replace(/\n+$/, '');
+  return joined.length > 0 ? joined : null;
 }
 
 app.message(async ({ message, say }) => {
@@ -156,17 +174,9 @@ app.message(async ({ message, say }) => {
 
   const messageTs = ('ts' in message ? message.ts : '') || '';
 
-  const friendly = (ts: string) => new Date(parseFloat(ts) * 1000).toLocaleString('en-US', {
-    timeZone: 'America/Los_Angeles', weekday: 'short', month: 'short', day: 'numeric',
-    hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
-  });
   let prompt = text;
-  if (messageTs) {
-    prompt += `\n\n[ts: ${messageTs} | ${friendly(messageTs)}]`;
-  } else {
-    const nowTs = (Date.now() / 1000).toFixed(6);
-    prompt += `\n\n[ts: ${nowTs} | ${friendly(nowTs)}]`;
-  }
+  const ts = messageTs || (Date.now() / 1000).toFixed(6);
+  prompt += `\n\n[ts: ${ts} | ${friendlyTimestamp(ts)}]`;
   if (files && files.length > 0) {
     const sanitizeName = (name: string | undefined): string => {
       if (!name) return 'unnamed';
@@ -230,23 +240,11 @@ app.message(async ({ message, say }) => {
       prompt = `${banner}\n[END SESSION CONTEXT]\n\n${prompt}`;
     }
 
-    const slackMcp = createSlackMcp({ app, channelId, workspaceDir: workDir });
-    const cronMcp = createCronMcp({ channelId, app, anthropicApiKey: SECRETS.ANTHROPIC_API_KEY, userName, workDir });
-    const mediaMcp = createMediaMcp({ geminiApiKey: SECRETS.GEMINI_API_KEY, workDir });
-    const searchMcp = createSearchMcp({ perplexityApiKey: SECRETS.PERPLEXITY_API_KEY });
-    const brainMcp = createBrainMcp({ workDir, userName });
-    const githubMcp = createGithubMcp({ ghToken: SECRETS.GH_TOKEN, app, channelId });
-    const oracleMcp = createOracleMcp({ openaiApiKey: SECRETS.OPENAI_API_KEY });
-    const voiceMcp = createVoiceMcp({ elevenlabsApiKey: SECRETS.ELEVENLABS_API_KEY, workDir, defaultVoiceId: ELEVENLABS_VOICE_ID });
-    const audioMcp = createAudioMcp({ openaiApiKey: SECRETS.OPENAI_API_KEY, workDir });
-    const firecrawlMcp = createFirecrawlMcp({ firecrawlApiKey: SECRETS.FIRECRAWL_API_KEY });
-    const browserMcp = createBrowserMcp({ workDir });
-
-    // Snapshot CLAUDE.md before the agent runs to detect tampering
+    // Snapshot CLAUDE.md (restored on tamper) and SOUL/MEMORY (reported, not restored)
     const claudeMdPath = `${workDir}/CLAUDE.md`;
     const claudeMdSnapshot = snapshotClaudeMd(claudeMdPath);
+    const identitySnapshot = snapshotIdentity(workDir);
 
-    let result: string | null = null;
     let newSessionId: string | undefined;
     let totalCostUsd = 0;
     let numTurns = 0;
@@ -254,64 +252,33 @@ app.message(async ({ message, say }) => {
 
     for await (const msg of query({
         prompt,
-        options: {
-          model: AGENT_MODEL,
-          thinking: { type: 'adaptive' },
-          effort: 'max',
-          betas: ['code-execution-web-tools-2026-02-09' as any, ...BETAS],
-          maxBudgetUsd: MAX_BUDGET_USD,
-          maxTurns: 200,
-          systemPrompt: buildSystemPrompt(workDir, userName),
-          cwd: workDir,
-          resume: sessionId,
-          env: { ...process.env, ANTHROPIC_API_KEY: SECRETS.ANTHROPIC_API_KEY, ENABLE_TOOL_SEARCH: 'false' },
-          ...(sessionId ? {} : { plugins: [{ type: 'local' as const, path: path.resolve('plugins') }] }),
+        options: buildQueryOptions({
+          workDir,
+          channelId,
+          anthropicApiKey: SECRETS.ANTHROPIC_API_KEY,
+          userName,
+          sessionId,
           allowedTools: [
-            'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
+            'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Task',
             'WebSearch', 'WebFetch',
             'mcp__slack__*', 'mcp__cron__*', 'mcp__media__*', 'mcp__search__*',
-            'mcp__second-brain__*',
-            'mcp__github__*',
-            'mcp__oracle__*',
-            'mcp__voice__*',
-            'mcp__audio__*',
-            'mcp__firecrawl__*',
-            'mcp__browser__*',
+            'mcp__second-brain__*', 'mcp__github__*', 'mcp__oracle__*',
+            'mcp__voice__*', 'mcp__audio__*', 'mcp__firecrawl__*', 'mcp__browser__*',
           ],
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
-          settingSources: ['project'],
-          sandbox: {
-            enabled: true,
-            autoAllowBashIfSandboxed: true,
-            allowUnsandboxedCommands: false,
-            network: {
-              allowLocalBinding: false,
-              allowedDomains: [
-                'api.anthropic.com',
-                'statsig.anthropic.com',
-                'sentry.io',
-              ],
-            },
-          },
           mcpServers: {
-            slack: slackMcp,
-            cron: cronMcp,
-            media: mediaMcp,
-            search: searchMcp,
-            'second-brain': brainMcp,
-            github: githubMcp,
-            oracle: oracleMcp,
-            voice: voiceMcp,
-            audio: audioMcp,
-            firecrawl: firecrawlMcp,
-            browser: browserMcp,
+            slack: createSlackMcp({ app, channelId, workspaceDir: workDir }),
+            cron: createCronMcp({ channelId, app, anthropicApiKey: SECRETS.ANTHROPIC_API_KEY, userName, workDir }),
+            media: createMediaMcp({ geminiApiKey: SECRETS.GEMINI_API_KEY, workDir }),
+            search: createSearchMcp({ perplexityApiKey: SECRETS.PERPLEXITY_API_KEY }),
+            'second-brain': createBrainMcp({ workDir, userName }),
+            github: createGithubMcp({ ghToken: SECRETS.GH_TOKEN, app, channelId }),
+            oracle: createOracleMcp({ openaiApiKey: SECRETS.OPENAI_API_KEY }),
+            voice: createVoiceMcp({ elevenlabsApiKey: SECRETS.ELEVENLABS_API_KEY, workDir, defaultVoiceId: ELEVENLABS_VOICE_ID }),
+            audio: createAudioMcp({ openaiApiKey: SECRETS.OPENAI_API_KEY, workDir }),
+            firecrawl: createFirecrawlMcp({ firecrawlApiKey: SECRETS.FIRECRAWL_API_KEY }),
+            browser: createBrowserMcp({ workDir }),
           },
-          hooks: {
-            PreToolUse: [{ hooks: [createToolPolicy(workDir, channelId)] }],
-            PostToolUse: [{ hooks: [createAuditHook(channelId)] }],
-          },
-        },
+        }),
       })) {
         const sub = 'subtype' in msg ? ` subtype=${(msg as any).subtype}` : '';
         console.log(`[host:sdk] type=${msg.type}${sub}`);
@@ -330,17 +297,15 @@ app.message(async ({ message, say }) => {
               cacheReadTokens: resultMsg.usage.cacheReadInputTokens,
             };
           }
-          if ('result' in resultMsg && resultMsg.result) {
-            result = resultMsg.result as string;
-          }
         }
       }
 
     touchSession(channelId);
     if (newSessionId) saveSessionId(channelId, newSessionId);
 
-    // Check CLAUDE.md integrity — restore if tampered
+    // CLAUDE.md: restore on tamper. SOUL/MEMORY: report but allow.
     checkClaudeMdIntegrity(claudeMdPath, claudeMdSnapshot, channelId);
+    await reportIdentityChanges(workDir, identitySnapshot, app, channelId);
 
     // --- Cost tracking ---
     if (totalCostUsd > 0) {
@@ -388,9 +353,6 @@ app.message(async ({ message, say }) => {
       }
     }
 
-    if (result) {
-      console.log(`[host] query() returned ${result.length} chars (discarded — agent must use send_message)`);
-    }
   } catch (err) {
     console.error(`[host] Error processing message in ${channelId}:`, err);
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -666,15 +628,10 @@ writePidFile();
 const heartbeatChannel = process.env.HEARTBEAT_CHANNEL;
 
 if (heartbeatChannel && startupReason === 'crash') {
-  const now = new Date().toLocaleString('en-US', {
-    timeZone: 'America/Los_Angeles',
-    weekday: 'short', month: 'short', day: 'numeric',
-    hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
-  });
   try {
     await app.client.chat.postMessage({
       channel: heartbeatChannel,
-      text: `:warning: *Restarted after unexpected exit* — ${now}\nPrevious process didn't shut down cleanly. launchd auto-restarted.`,
+      text: `:warning: *Restarted after unexpected exit* — ${friendlyTimestamp(new Date())}\nPrevious process didn't shut down cleanly. launchd auto-restarted.`,
     });
     console.log('[host] Posted crash-restart alert to Slack');
   } catch (err) {

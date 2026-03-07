@@ -1,108 +1,105 @@
 # Cost Management
 
-Guide to understanding, controlling, and monitoring the cost of running a hello-claw agent.
+Understanding, controlling, and monitoring the cost of running a hello-claw agent.
 
 ---
 
 ## Default Cost Profile
 
-A fresh deployment with default settings costs approximately **$3-8/day** with light interactive use:
+A fresh checkout with default settings (Sonnet, heartbeat off, $3/day cap) costs approximately nothing while idle and $0.10–$1.50 per interactive message depending on session length.
 
-| Component | Default | Estimated Cost |
-|-----------|---------|---------------|
-| Heartbeat (8 beats/day, Opus) | Fixed schedule | ~$2-4/day |
-| Interactive messages | Varies with usage | ~$0.10-0.50/message |
-| Cron tasks | None by default | $0/day |
-| Daily budget cap | $20/day | Auto-pauses at limit |
+| Component | Default Setting | Default Cost |
+|---|---|---|
+| Heartbeat | `HEARTBEAT_MODE=off` | $0/day |
+| Interactive | Sonnet, `effort: high` | ~$0.10–1.50/message |
+| Cron tasks | None scheduled | $0/day |
+| Daily cap | $3 | Auto-pauses when exceeded |
 
-Costs scale with usage — heavy interactive sessions (many turns, large tool results) can consume $5-15 per session. The daily budget cap prevents runaway spending.
+If you turn the heartbeat on and switch to Opus — which is the configuration the project was built around — you're looking at $5–15/day with light interactive use. The daily cap exists for a reason.
 
 ---
 
-## Configuration Options
+## Configuration
 
-| Setting | Env Var / File | Default | Description | Cost Impact |
-|---------|---------------|---------|-------------|-------------|
-| Daily budget | `MAX_DAILY_BUDGET_USD` in `config.ts` | $20 | Auto-pauses agent when exceeded | Hard ceiling on daily spend |
-| Per-session budget | `MAX_BUDGET_USD` in `config.ts` | $50 | SDK `maxBudgetUsd` per `query()` call | Limits individual runaway sessions |
-| Agent model | `AGENT_MODEL` in `config.ts` | `claude-opus-4-6` | Model for all query() calls | Opus is 5x more expensive than Haiku |
-| Heartbeat schedule | `HEARTBEAT_SCHEDULE` in `heartbeat.ts` | 8 beats/day | Fixed Pacific Time schedule | Each beat costs approximately $0.20-0.50 |
-| Long-context beta | `BETAS` in `config.ts` | Disabled (empty) | Enables 1M token context window | Triggers 2x pricing above 200K tokens |
-| ToolSearch | `ENABLE_TOOL_SEARCH` in env | `true` | Defers tool schema loading | Reduces tool schema tokens by approximately 85% |
-| Effort level | Set in `query()` options | `max` | Controls thinking depth | Higher effort = more output tokens + context growth |
-| API proxy | `API_LOG_PROXY` in env | Disabled | Intercepts API traffic for logging | Enables cache stabilization (saves money) |
+All settings are env-driven. Set them in `.env` (dev) or `~/hello-claw/.env` (Mini).
+
+| Setting | Env Var | Default | Cost Impact |
+|---|---|---|---|
+| Daily budget | `MAX_DAILY_BUDGET_USD` | `3` | Hard ceiling — auto-pauses when hit |
+| Per-session budget | `MAX_SESSION_BUDGET_USD` | `50` | SDK kills a single runaway `query()` |
+| Primary model | `AGENT_MODEL` | `claude-sonnet-4-6` | Opus is roughly 5x Sonnet per token |
+| Effort level | `AGENT_EFFORT` | `high` | Higher effort → more thinking tokens + context growth |
+| Cron model | `CRON_MODEL` | same as `AGENT_MODEL` | Independent dial for scheduled tasks |
+| Heartbeat schedule | `HEARTBEAT_MODE` | `off` | See heartbeat section |
+| Agent timezone | `AGENT_TIMEZONE` | `America/Los_Angeles` | Affects when the 4am cost-day rolls over |
 
 ---
 
 ## Budget Enforcement
 
-The budget system has two layers:
+Two layers.
 
-### Per-Session Cap (`MAX_BUDGET_USD`)
+### Per-Session Cap (`MAX_SESSION_BUDGET_USD`)
 
-The SDK's `maxBudgetUsd` option limits each `query()` call. If a single interactive message, heartbeat, or cron task exceeds this, the SDK stops the session. Default: $50.
+Passed to the SDK as `maxBudgetUsd` on every `query()` call. If a single interactive message, heartbeat, or cron task burns through this, the SDK halts the session. Default $50 is a safety net, not a daily control — most sessions use under $2.
 
 ### Daily Cap (`MAX_DAILY_BUDGET_USD`)
 
-`cost-tracker.ts` accumulates costs from every `query()` result across all sources (interactive, heartbeat, cron). The cost day boundary is **4:00 AM Pacific Time** — costs reset at that point.
-
-**Flow:**
+`cost-tracker.ts` accumulates `total_cost_usd` from every `query()` result across all sources (interactive, heartbeat, cron). The cost day rolls over at **4am in `AGENT_TIMEZONE`** — the same boundary that resets sessions.
 
 1. Every `query()` result reports `total_cost_usd`
 2. `recordCost()` adds it to `data/costs/daily.json`
-3. After each interactive message, a cost summary is posted to Slack: `$0.42 (3 turns) | today: $12.38`
-4. At 50% of daily budget, a warning is posted
-5. At 100% of daily budget, `setPaused(true)` is called and an auto-pause message is posted
-6. The agent stops responding to messages, heartbeats, and cron tasks
+3. After each interactive message, a summary is posted to Slack: `$0.42 (3 turns) | today: $1.38`
+4. At 50% of budget, a warning is posted
+5. At 100%, `setPaused(true)` is called and an auto-pause message is posted
+6. Agent stops responding to messages, heartbeats, and cron
 7. User sends `!unpause` to resume (shows current daily total)
 
-**Persistence:** Pause state is saved to `data/pause-state.json` and survives process restarts.
+Pause state lives in `data/pause-state.json` and survives restarts.
 
 ---
 
 ## Heartbeat Cost
 
-Heartbeats are ephemeral sessions — each beat starts fresh with no conversation history. The cost per beat depends on the system prompt size, tool count, and model.
+Heartbeats are ephemeral — each beat starts a fresh session with no conversation history. Default is `off`. When you turn it on, beats are **tiered**.
 
-### Estimated Cost Per Beat
+### Tiers
 
-| Model | Estimated Input Tokens | Estimated Cost/Beat |
-|-------|----------------------|-------------------|
-| Opus 4.6 | ~30-45K | ~$0.20-0.50 |
-| Sonnet 4.6 | ~30-45K | ~$0.12-0.30 |
-| Haiku 4.5 | ~30-45K | ~$0.04-0.10 |
+| Tier | When | Model | Effort | Turn Cap |
+|---|---|---|---|---|
+| `flagship` | Wakeup beat + wind-down beats | `AGENT_MODEL` | `AGENT_EFFORT` | 50 |
+| `economy` | Midday beats | `claude-sonnet-4-6` | `medium` | 15 |
 
-### Daily Heartbeat Cost (8 beats/day)
+The reasoning: the wakeup beat is the agent's first look at the day — worth the good model. The wind-down beats are when it reflects on what happened and consolidates memory — also worth it. The midday beats are mostly "anything urgent? no? ok" — Sonnet at medium effort with a 15-turn leash is plenty for that.
 
-| Model | Estimated Daily Cost |
-|-------|---------------------|
-| Opus 4.6 | ~$1.60-4.00 |
-| Sonnet 4.6 | ~$0.96-2.40 |
-| Haiku 4.5 | ~$0.32-0.80 |
+### Schedules
 
-The default configuration uses Opus for heartbeats. Switching to a lighter model for heartbeats is a significant cost reduction. The fixed 8-beat schedule (reduced from the original 32 beats/day at 30-min intervals) already represents a 75% reduction.
+| Mode | Beats | Tier Layout (in `AGENT_TIMEZONE`) |
+|---|---|---|
+| `off` | 0/day | — |
+| `conservative` | 4/day | 8:00 flagship · 12:00 economy · 18:00 economy · 22:00 flagship |
+| `standard` | 8/day | 7:00 flagship · 10/13/16/19:00 economy · 22/22:30/23:00 flagship (wind-down trilogy) |
 
-**Schedule (Pacific Time):** 7:00, 10:00, 13:00, 16:00, 19:00, 22:00, 22:30, 23:00
+### Estimated Daily Heartbeat Cost
+
+Rough numbers — actuals depend on system prompt size, tool count, what the agent decides to do.
+
+| Mode | With `AGENT_MODEL=sonnet` | With `AGENT_MODEL=opus` |
+|---|---|---|
+| `conservative` (2 flagship + 2 economy) | ~$0.50–1.50/day | ~$1.00–2.50/day |
+| `standard` (4 flagship + 4 economy) | ~$1.00–3.00/day | ~$2.00–5.00/day |
+
+With `AGENT_MODEL=sonnet`, flagship and economy tiers are the same model — the difference is effort and turn cap, which still saves on output tokens.
 
 ---
 
-## Cache Stabilization
+## Sub-Agents and Context Protection
 
-The API proxy (`src/lib/api-proxy.ts`) intercepts SDK-to-Anthropic traffic and applies two cache stabilization techniques:
+Three curator sub-agents (`web-curator`, `workspace-archaeologist`, `deep-research`) are registered on every `query()` call via `options.agents`. They run on Sonnet in isolated contexts.
 
-### UUID Replacement
+The cost argument: a 50K-char `deep_research` result pulled into the main session at turn 3 of a 10-turn conversation gets re-read 7 more times — effectively 350K input tokens, not 50K. Delegate the call to the `deep-research` sub-agent, it absorbs the 50K in its own context, returns the curated 5K, and only that 5K compounds across subsequent turns.
 
-The SDK embeds a random `crypto.randomUUID()` in Bash tool descriptions (sandbox path). A new UUID per `query()` call breaks the prefix cache — the first approximately 17K tokens of system prompt + tool schemas must be re-written to cache on every call.
-
-The proxy replaces random UUIDs with a deterministic UUID derived from `SHA-256("bash-uuid-" + sessionId)`. Same session = same UUID = cache hit. This saves approximately $0.10-0.20 per cache write that would otherwise be a miss.
-
-### WebFetch Auth Warning Stripping
-
-The WebFetch tool description conditionally includes an auth warning paragraph that flickers on/off between calls. The proxy strips this to keep the tool description stable.
-
-### Impact
-
-Without stabilization, the system prompt + tools prefix changes on every API call, forcing a full cache write (approximately $0.10-0.25 at Opus rates). With stabilization, the prefix stays identical across calls within a session, allowing cache reads at 10x lower cost.
+Sub-agents aren't free — spawning one is a Sonnet round-trip. But for genuinely large raw material (web pages, research dumps, wide grep sweeps), the isolation math works out well. See `plugins/skills/delegation/SKILL.md` for the agent-facing guidance on when to delegate vs. call directly.
 
 ---
 
@@ -110,64 +107,52 @@ Without stabilization, the system prompt + tools prefix changes on every API cal
 
 ### Real-Time (Slack)
 
-After every interactive response, the agent posts a cost summary:
-
+After every interactive response:
 ```
-$0.42 (3 turns) | today: $12.38
+$0.42 (3 turns) | today: $1.38
 ```
 
-Heartbeats post their own cost summaries with a heartbeat emoji.
+Heartbeats post their own summaries with a heartbeat emoji.
 
-### Cost Data Files
+### Data Files
 
 | File | Format | Contents |
-|------|--------|----------|
-| `data/costs/daily.json` | JSON | Current day's accumulated cost, entry count |
-| `data/costs/costs.jsonl` | JSONL | Append-only log of every query() cost (timestamp, source, channel, cost, turns, tokens) |
+|---|---|---|
+| `data/costs/daily.json` | JSON | Current agent-day's accumulated cost, entry count |
+| `data/costs/costs.jsonl` | JSONL | Append-only log of every `query()` cost (timestamp, source, channel, cost, turns, tokens) |
 
-### Cost Visualization (cost-viz)
+### cost-viz
 
-The API proxy logs full request/response metadata to `data/api-logs/` as hourly JSONL files (24-hour retention). The `tools/cost-viz/` tooling extracts, analyzes, and visualizes these logs:
+The API proxy (when enabled via `API_LOG_PROXY`) logs full request/response metadata to `data/api-logs/` as hourly JSONL files. The `tools/cost-viz/` tool extracts and visualizes these:
 
 ```bash
-make cost-viz         # Rsync logs from host, extract, report
-/start-viz            # Serve + open browser
-/stop-viz             # Kill the server
+make cost-viz         # rsync logs from host, extract, report
+/start-viz            # serve + open browser
+/stop-viz             # kill the server
 ```
 
-Features:
-- Per-session stacked bar charts showing 8 input categories + output
-- Tokens vs. USD toggle
-- Cache mutation detection — shows exactly what string change broke the prefix cache
-- Click any bar for detailed actual/estimated breakdown
-- Subagent call detection
-
-See `tools/cost-viz/README.md` for data format details and the full feature list.
+Per-session stacked bar charts, tokens-vs-USD toggle, cache mutation detection (shows what string change broke the prefix cache), subagent call detection. See `tools/cost-viz/README.md` for details.
 
 ---
 
-## Cost Optimization Tips
+## Optimization
 
 ### High Impact
 
-1. **Stay under 200K tokens.** The long-context surcharge doubles all input pricing when total input exceeds 200K tokens. The default configuration disables the 1M context beta, so autocompact triggers at approximately 167K tokens — safely below the threshold.
+1. **Keep sessions short.** Each turn re-reads the entire context. A session that grows from 30K to 150K tokens over 10 turns costs ~900K total input tokens, not 150K. Use `!clear` between unrelated conversations. The 4am daily reset forces a clean slate once a day.
 
-2. **Use session lifecycle controls.** Daily reset (4am PT) prevents unbounded context growth. Idle compaction (>2h) triggers autocompact on the next message. Manual `!clear` and `!compact` commands give direct control.
+2. **Delegate noisy work.** A single firecrawl scrape that returns 80K chars compounds across every subsequent turn. The `web-curator` sub-agent absorbs it in an isolated Sonnet context and returns the 5K that matters. Same for `deep_research` and wide workspace greps.
 
-3. **Enable the API proxy for cache stabilization.** Set `API_LOG_PROXY=1` in `.env` to activate UUID replacement and WebFetch flicker stripping.
+3. **Tier your heartbeat.** The default tier split already routes the cheap model to midday beats. If `AGENT_MODEL=opus`, that's a real saving. If you need heartbeats but not the wind-down trilogy, `conservative` has half the flagship beats of `standard`.
 
 ### Medium Impact
 
-4. **Consider model routing for heartbeats.** Heartbeats rarely need Opus-level reasoning. Using a lighter model for heartbeats can reduce daily baseline cost by 60-80%.
+4. **`CRON_MODEL`.** Scheduled tasks often don't need the same model as interactive. A cron job that pulls a daily summary doesn't need Opus.
 
-5. **Keep sessions short.** Long sessions accumulate thinking blocks, tool results, and conversation history that compound in cost. Each turn re-reads the entire context. A session that grows from 30K to 150K tokens over 10 turns costs approximately 900K total input tokens, not 150K.
+5. **`AGENT_EFFORT`.** Dropping from `max` to `high` (the default) cuts thinking output substantially with a small quality cost for most tasks. `medium` is fine for routine work.
 
-6. **Use ToolSearch.** Enabled by default (`ENABLE_TOOL_SEARCH=true`). Reduces tool schema tokens from approximately 10K+ to approximately 1.5K by deferring tool loading.
+6. **Monitor cache hit rate.** Healthy sessions show >85% cache-read. Low rates mean prefix instability (check cost-viz for what's mutating) or >5 minute gaps between messages (cache TTL).
 
-### Lower Impact
+### Low Impact
 
-7. **Minimize large tool results early in sessions.** A 50K-char firecrawl result added at turn 3 of a 10-turn session is re-read 7 more times — effectively costing 350K input tokens instead of 50K.
-
-8. **Use subagents for browsing.** The browse skill encourages delegating multi-page reading to cheaper subagents via the Task tool.
-
-9. **Monitor cache hit rate.** Healthy sessions should have >85% cache hit rate. Low rates indicate prefix instability (check for system prompt changes between calls) or >5 minute gaps between messages (cache TTL expiration).
+7. **Position large results late.** A 50K tool result at turn 8 of a 10-turn session is re-read twice. The same result at turn 2 is re-read eight times.

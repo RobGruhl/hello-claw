@@ -6,19 +6,18 @@
  * Tasks require human approval via Slack reaction before they become active.
  */
 
-import path from 'path';
 import { createSdkMcpServer, tool, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { CronExpressionParser } from 'cron-parser';
 import type { App } from '@slack/bolt';
-import { getSessionId, saveSessionId } from '../lib/sessions.js';
-import { createToolPolicy } from '../hooks/tool-policy.js';
-import { createAuditHook } from '../hooks/audit.js';
 import { snapshotClaudeMd, checkClaudeMdIntegrity } from '../lib/integrity.js';
 import { acquireChannelLock } from '../lib/channel-lock.js';
 import { writeAuditEntry } from '../lib/audit-log.js';
-import { buildSystemPrompt } from '../lib/system-prompt.js';
-import { AGENT_MODEL, BETAS, MAX_BUDGET_USD } from '../lib/config.js';
+import { CRON_MODEL } from '../lib/config.js';
+import { AGENT_TIMEZONE, friendlyTimestamp } from '../lib/timezone.js';
+import { buildQueryOptions } from '../lib/query-config.js';
+import { isPaused } from '../lib/pause.js';
+import { recordCost } from '../lib/cost-tracker.js';
 import { markdownToMrkdwn } from '../lib/mrkdwn.js';
 import { createBrainMcp } from './brain.js';
 import { createMediaMcp } from './media.js';
@@ -26,7 +25,6 @@ import { createSearchMcp } from './search.js';
 
 const MAX_TASKS_PER_CHANNEL = 10;
 const APPROVAL_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
-const PACIFIC_TZ = 'America/Los_Angeles';
 
 export interface ScheduledTask {
   id: string;
@@ -44,6 +42,12 @@ export interface ScheduledTask {
   cancellationMessageTs?: string;
   cancellationTimeout?: ReturnType<typeof setTimeout>;
   nextRun?: string;
+  /** Last cron fire time (ms epoch). Used to detect missed beats —
+   *  .next() always returns a FUTURE time, so checking "is next within
+   *  60s of now" misses the case where the check interval itself drifts
+   *  past the fire time. Tracking lastFire and comparing to .prev()
+   *  catches every beat exactly once. */
+  lastFireMs?: number;
 }
 
 /**
@@ -130,9 +134,9 @@ export function parseOnceSchedule(input: string): { utcIso?: string; error?: str
     return { error: `Invalid timestamp: "${trimmed}". Use ISO format like "2026-02-08T15:30:00" or relative like "in 5m".` };
   }
 
-  // Get the Pacific offset for this date (handles PST/PDT automatically)
+  // Get the agent-timezone offset for this date (handles DST automatically)
   const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: PACIFIC_TZ,
+    timeZone: AGENT_TIMEZONE,
     timeZoneName: 'shortOffset',
   });
   const parts = formatter.formatToParts(naiveDate);
@@ -150,7 +154,7 @@ export function parseOnceSchedule(input: string): { utcIso?: string; error?: str
 /** Format a time in Pacific for display. */
 function formatPacificTime(date: Date): string {
   return date.toLocaleTimeString('en-US', {
-    timeZone: PACIFIC_TZ,
+    timeZone: AGENT_TIMEZONE,
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
@@ -172,12 +176,12 @@ export function formatScheduleDescription(scheduleType: string, scheduleValue: s
 
     const now = new Date();
     // Compare dates in Pacific
-    const dateInPacific = date.toLocaleDateString('en-US', { timeZone: PACIFIC_TZ });
-    const nowInPacific = now.toLocaleDateString('en-US', { timeZone: PACIFIC_TZ });
+    const dateInPacific = date.toLocaleDateString('en-US', { timeZone: AGENT_TIMEZONE });
+    const nowInPacific = now.toLocaleDateString('en-US', { timeZone: AGENT_TIMEZONE });
 
     const tomorrow = new Date(now);
     tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowInPacific = tomorrow.toLocaleDateString('en-US', { timeZone: PACIFIC_TZ });
+    const tomorrowInPacific = tomorrow.toLocaleDateString('en-US', { timeZone: AGENT_TIMEZONE });
 
     const time = formatPacificTime(date);
 
@@ -185,7 +189,7 @@ export function formatScheduleDescription(scheduleType: string, scheduleValue: s
     if (dateInPacific === tomorrowInPacific) return `tomorrow at ${time}`;
 
     const dayStr = date.toLocaleDateString('en-US', {
-      timeZone: PACIFIC_TZ,
+      timeZone: AGENT_TIMEZONE,
       weekday: 'short',
       month: 'short',
       day: 'numeric',
@@ -218,54 +222,55 @@ function generateId(): string {
 }
 
 async function executeTask(task: ScheduledTask, app: App, anthropicApiKey: string, userName?: string, secrets?: CronSecrets): Promise<void> {
-  // Skip if already running (prevents overlapping executions from interval/cron ticks)
   if (task.isRunning) {
     console.warn(`[cron] Skipping task ${task.id}: still running from previous tick`);
+    return;
+  }
+
+  // Respect the process-level pause flag. Without this check, cron tasks
+  // burn budget silently even after the daily cap auto-pauses the agent.
+  if (isPaused()) {
+    console.log(`[cron] Skipping task ${task.id}: agent is paused`);
     return;
   }
 
   task.isRunning = true;
   console.log(`[cron] Executing task ${task.id}: ${task.prompt.slice(0, 50)}...`);
 
-  // Acquire per-channel lock (shared with host.ts) to prevent session collisions
   const release = await acquireChannelLock(task.channelId);
 
   try {
     const workDir = task.workDir;
-    const sessionId = getSessionId(task.channelId);
 
-    // Snapshot CLAUDE.md before the scheduled agent runs
     const claudeMdPath = `${workDir}/CLAUDE.md`;
     const claudeMdSnapshot = snapshotClaudeMd(claudeMdPath);
 
-    let result: string | null = null;
-    let newSessionId: string | undefined;
+    let totalCostUsd = 0;
+    let numTurns = 0;
 
     const nowTs = (Date.now() / 1000).toFixed(6);
-    const friendly = new Date(parseFloat(nowTs) * 1000).toLocaleString('en-US', {
-      timeZone: 'America/Los_Angeles', weekday: 'short', month: 'short', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
-    });
     const scheduleDesc = formatScheduleDescription(task.scheduleType, task.scheduleValue);
     const name = userName || 'the user';
-    const scheduledPrompt = `[SCHEDULED TASK ${task.id} - You are running automatically, not in response to a message from ${name}. Use mcp__slack__send_message to communicate with ${name}.]\n[TASK_ID: ${task.id}]\n[SCHEDULE: ${scheduleDesc}]\n[ts: ${nowTs} | ${friendly}]\nIf this task's goal is complete, use mcp__cron__cancel_self to stop it from running again.\n\n${task.prompt}`;
+    const scheduledPrompt = `[SCHEDULED TASK ${task.id} - You are running automatically, not in response to a message from ${name}. Use mcp__slack__send_message to communicate with ${name}.]\n[TASK_ID: ${task.id}]\n[SCHEDULE: ${scheduleDesc}]\n[ts: ${nowTs} | ${friendlyTimestamp(nowTs)}]\nIf this task's goal is complete, use mcp__cron__cancel_self to stop it from running again.\n\n${task.prompt}`;
 
+    // Cron sessions are EPHEMERAL — no resume, no session ID saved.
+    // Previously this read getSessionId(channelId) which defaults to the
+    // 'interactive' type, meaning cron was resuming (and overwriting)
+    // the user's conversation session. That was the biggest bug in the
+    // codebase: the user's next message would resume a session full of
+    // cron output they never saw.
     for await (const msg of query({
       prompt: scheduledPrompt,
-      options: {
-        model: AGENT_MODEL,
-        thinking: { type: 'adaptive' },
-        effort: 'max',
-        betas: [...BETAS] as any,
-        maxBudgetUsd: MAX_BUDGET_USD,
-        maxTurns: 200,
-        systemPrompt: buildSystemPrompt(workDir, userName),
-        cwd: workDir,
-        resume: sessionId,
-        env: { ...process.env, ANTHROPIC_API_KEY: anthropicApiKey },
-        ...(sessionId ? {} : { plugins: [{ type: 'local' as const, path: path.resolve('plugins') }] }),
+      options: buildQueryOptions({
+        workDir,
+        channelId: task.channelId,
+        anthropicApiKey,
+        userName,
+        sessionId: undefined, // ephemeral — always fresh
+        model: CRON_MODEL,
+        maxTurns: 50,
         allowedTools: [
-          'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
+          'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Task',
           'WebSearch', 'WebFetch',
           'mcp__slack__*',
           'mcp__cron__cancel_self',
@@ -274,22 +279,6 @@ async function executeTask(task: ScheduledTask, app: App, anthropicApiKey: strin
           ...(secrets?.geminiApiKey ? ['mcp__media__*'] : []),
           ...(secrets?.perplexityApiKey ? ['mcp__search__*'] : []),
         ],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project'],
-        sandbox: {
-          enabled: true,
-          autoAllowBashIfSandboxed: true,
-          allowUnsandboxedCommands: false,
-          network: {
-            allowLocalBinding: false,
-            allowedDomains: [
-              'api.anthropic.com',
-              'statsig.anthropic.com',
-              'sentry.io',
-            ],
-          },
-        },
         mcpServers: {
           slack: createSlackMcpForTask(app, task.channelId),
           cron: createCronMcpForTask(task.id, task.channelId, app),
@@ -297,27 +286,27 @@ async function executeTask(task: ScheduledTask, app: App, anthropicApiKey: strin
           ...(secrets?.geminiApiKey ? { media: createMediaMcp({ geminiApiKey: secrets.geminiApiKey, workDir }) } : {}),
           ...(secrets?.perplexityApiKey ? { search: createSearchMcp({ perplexityApiKey: secrets.perplexityApiKey }) } : {}),
         },
-        hooks: {
-          PreToolUse: [{ hooks: [createToolPolicy(workDir, task.channelId)] }],
-          PostToolUse: [{ hooks: [createAuditHook(task.channelId)] }],
-        },
-      },
+      }),
     })) {
-      if (msg.type === 'system' && msg.subtype === 'init') {
-        newSessionId = msg.session_id;
-      }
-      if ('result' in msg && msg.result) {
-        result = msg.result as string;
+      if (msg.type === 'result') {
+        const r = msg as any;
+        totalCostUsd = r.total_cost_usd || 0;
+        numTurns = r.num_turns || 0;
       }
     }
 
-    if (newSessionId) saveSessionId(task.channelId, newSessionId);
-
-    // Check CLAUDE.md integrity — restore if tampered
     checkClaudeMdIntegrity(claudeMdPath, claudeMdSnapshot, task.channelId);
 
-    if (result) {
-      console.log(`[cron] Task ${task.id} query() returned ${result.length} chars (discarded — agent must use send_message)`);
+    // Previously invisible to the daily budget — cron could spend forever.
+    if (totalCostUsd > 0) {
+      recordCost({
+        timestamp: new Date().toISOString(),
+        source: 'cron',
+        channelId: task.channelId,
+        costUsd: totalCostUsd,
+        numTurns,
+      });
+      console.log(`[cron] Task ${task.id} cost: $${totalCostUsd.toFixed(4)} (${numTurns} turns)`);
     }
   } catch (err) {
     console.error(`[cron] Task ${task.id} failed:`, err);
@@ -464,18 +453,20 @@ function startSchedule(task: ScheduledTask, app: App, anthropicApiKey: string, u
     }, ms);
     task.nextRun = new Date(Date.now() + ms).toISOString();
   } else if (task.scheduleType === 'cron') {
-    // Simple cron: check every minute if we should run
+    // Check every minute. Fire if the most-recent scheduled time (.prev())
+    // is newer than our last fire. This is immune to check-interval drift
+    // and can't double-fire.
+    task.lastFireMs = Date.now();
     const checkInterval = setInterval(() => {
       if (task.status !== 'active' && task.status !== 'pending_cancellation') return;
       try {
-        const interval = CronExpressionParser.parse(task.scheduleValue);
-        const next = interval.next().toDate();
-        const now = new Date();
-        // If next run is within the check window (60s), execute
-        if (Math.abs(next.getTime() - now.getTime()) < 60_000) {
+        const expr = CronExpressionParser.parse(task.scheduleValue);
+        const prevMs = expr.prev().toDate().getTime();
+        if (prevMs > (task.lastFireMs ?? 0)) {
+          task.lastFireMs = prevMs;
           executeTask(task, app, anthropicApiKey, userName, secrets);
         }
-        task.nextRun = next.toISOString();
+        task.nextRun = CronExpressionParser.parse(task.scheduleValue).next().toDate().toISOString();
       } catch {
         // Invalid cron, skip
       }

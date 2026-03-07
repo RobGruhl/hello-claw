@@ -242,19 +242,30 @@ The agent uses a shared workspace directory for persistent memory and data.
 
 ## Cost Controls
 
-All cost settings are env-driven with conservative defaults that protect your wallet out of the box:
+All cost settings are env-driven with **frugal defaults** — a fresh checkout costs approximately nothing while idle:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_DAILY_BUDGET_USD` | `5` | Daily spending limit — auto-pauses agent when exceeded |
+| `MAX_DAILY_BUDGET_USD` | `3` | Daily spending limit — auto-pauses agent when exceeded |
 | `MAX_SESSION_BUDGET_USD` | `50` | Per-session budget cap via SDK `maxBudgetUsd` |
-| `HEARTBEAT_MODE` | `conservative` | Schedule preset: `conservative` (4/day), `standard` (8/day), `off` |
-| `AGENT_MODEL` | `claude-opus-4-6` | Model for all `query()` calls |
-| `ENABLE_1M_CONTEXT` | `false` | Enable 1M token context window (2x pricing surcharge) |
+| `HEARTBEAT_MODE` | `off` | Schedule preset: `off`, `conservative` (4/day, tiered), `standard` (8/day, tiered) |
+| `AGENT_MODEL` | `claude-sonnet-4-6` | Primary model — interactive sessions + flagship heartbeat tier |
+| `AGENT_EFFORT` | `high` | Reasoning effort: `low` \| `medium` \| `high` \| `max` |
+| `CRON_MODEL` | `AGENT_MODEL` | Model for scheduled cron tasks |
+| `AGENT_TIMEZONE` | `America/Los_Angeles` | IANA timezone for timestamps, cron, and the 4am daily reset |
 
 The daily budget auto-pauses the agent and sends a Slack notification when exceeded. Use `!unpause` in Slack to resume. A 50% warning is posted when the agent crosses half the daily budget.
 
+**Heartbeat tiers** — when enabled, each beat carries a tier. Flagship beats (wakeup + wind-down) run `AGENT_MODEL` at full effort; economy beats (midday) run Sonnet at medium effort with capped turns. The beats that matter get the quality, the beats that are mostly "anything urgent? no? ok" don't.
+
 Add these to your `.env` file — all are optional with safe defaults. Run `/configure` in Claude Code for an interactive walkthrough.
+
+For the full-presence experience the project was designed around:
+```
+AGENT_MODEL=claude-opus-4-6
+HEARTBEAT_MODE=standard
+MAX_DAILY_BUDGET_USD=20
+```
 
 ## Mac Mini Deployment (Optional)
 
@@ -283,8 +294,9 @@ Developer workflow commands for Claude Code (defined in `.claude/commands/`):
 | `/deploy` | Hot-deploy to Mac Mini — typecheck, build, commit, scp, restart, verify |
 | `/initialize` | First-run workspace initialization — seed templates, constitution, verify |
 | `/configure` | Interactive walkthrough for cost and model configuration |
+| `/upgrade` | Migrate a running v1.1.x agent — audit config drift, pin old defaults if wanted, deploy |
 
-Run `/deploy` first to get code on the Mini, then `/initialize` for first-time agent setup.
+Run `/deploy` first to get code on the Mini, then `/initialize` for first-time agent setup. Run `/upgrade` if you already have a v1.1.x agent running and want to move to current defaults without surprises.
 
 ## Workspace Seed Templates
 
@@ -330,19 +342,22 @@ src/
     tool-policy.ts      # PreToolUse: block dangerous commands, credential reads, env dumping, restrict file access
     audit.ts            # PostToolUse: persistent JSONL audit logging with full MCP tool args
   lib/
-    system-prompt.ts    # Static system prompt for all query() calls
-    channel-lock.ts     # Per-channel async mutex (prevents session collisions)
-    sessions.ts         # Channel -> session ID persistence
+    system-prompt.ts    # Dynamic system prompt — injects SOUL.md, agent name/pronouns, Slack mrkdwn rules
+    query-config.ts     # Shared query() option factory + sub-agent definitions (web-curator, workspace-archaeologist, deep-research)
+    timezone.ts         # AGENT_TIMEZONE, agentDay(), friendlyTimestamp() — single source of truth for the 4am boundary
+    channel-lock.ts     # Per-channel async mutex (promise-chain, no TOCTOU gap)
+    sessions.ts         # Channel -> session ID persistence with daily reset
     workspace.ts        # Workspace directory management
     audit-log.ts        # JSONL audit log writer
     integrity.ts        # CLAUDE.md tamper detection and restore
+    identity-watch.ts   # SOUL.md/MEMORY.md change detection — posts Slack diff, never blocks
     rate-limit.ts       # Per-tool-category rate limiting (100/day)
-    heartbeat.ts        # Autonomous periodic check-ins (configurable schedule presets)
-    config.ts           # Configuration constants (env-driven budget caps, model, heartbeat mode)
+    heartbeat.ts        # Autonomous periodic check-ins with time-aware tiers (flagship/economy)
+    config.ts           # Configuration constants (env-driven budget caps, model, effort, heartbeat mode)
     cost-tracker.ts     # Daily cost accumulation and budget enforcement
     pause.ts            # Process-level pause flag (survives restarts)
     mrkdwn.ts           # Slack markdown formatting utilities
-    api-proxy.ts        # HTTP proxy for SDK API calls (cache stabilization, JSONL logging)
+    api-proxy.ts        # HTTP proxy for SDK API calls (JSONL logging for cost-viz)
 plugins/
   skills/
     slack/SKILL.md      # Behavioral skill: message formatting, file handling, channel awareness
@@ -355,6 +370,7 @@ plugins/
     voice/SKILL.md      # Behavioral skill: TTS integration, audio tag generation
     audio/SKILL.md      # Behavioral skill: voice message transcription workflow
     browse/SKILL.md     # Behavioral skill: unified web reading — firecrawl, browser, WebFetch decision tree
+    delegation/SKILL.md # Behavioral skill: when to spawn sub-agents for context protection
 workspace-seed/             # Seed templates copied to workspace on first run
 constitution/
   2026-01-26-constitution.md  # Anthropic Claude Constitution (reference)
@@ -395,13 +411,17 @@ npm start          # Run compiled output
 
 ## Agent Intelligence
 
-The agent runs best with maximum intelligence settings in the `query()` call:
+Intelligence is a dial, not a fixed setting. The defaults are frugal (Sonnet, heartbeat off, $3/day) so a fresh checkout doesn't surprise you on the bill. Turn things up once you've built trust with the system.
 
-- **Model**: `claude-opus-4-6` (configurable via `AGENT_MODEL`)
+- **Model**: `claude-sonnet-4-6` by default, `claude-opus-4-6` when you want the best reasoning — set via `AGENT_MODEL`
+- **Effort**: `high` by default — four levels available (`low` | `medium` | `high` | `max`) via `AGENT_EFFORT`
 - **Thinking**: `{ type: "adaptive" }` — SDK chooses reasoning depth per turn
-- **Context**: 1M token beta available via `ENABLE_1M_CONTEXT=true` (disabled by default — 2x pricing surcharge)
-- **Budget cap**: Per-session via `MAX_SESSION_BUDGET_USD` (default: $50), daily via `MAX_DAILY_BUDGET_USD` (default: $5)
-- **System prompt**: loaded from `src/lib/system-prompt.ts` with behavioral skills appended via `plugins`
+- **Sub-agents**: three curator sub-agents (`web-curator`, `workspace-archaeologist`, `deep-research`) are registered on every `query()` call. They run on Sonnet in isolated contexts, absorb the 50K-char firehose (web pages, deep_research output, wide grep sweeps), and return 2–15K chars of verbatim excerpts. The `Task` tool is available to the agent at all three call sites; the delegation skill teaches it when to use it
+- **Heartbeat tiers**: when enabled, wakeup + wind-down beats run `AGENT_MODEL` at full effort, midday beats run Sonnet at medium — the beats that matter get the quality
+- **Budget cap**: per-session via `MAX_SESSION_BUDGET_USD` (default: $50), daily via `MAX_DAILY_BUDGET_USD` (default: $3)
+- **System prompt**: built by `src/lib/system-prompt.ts` — injects SOUL.md, agent name/pronouns, Slack mrkdwn rules — with behavioral skills appended via `plugins`
+
+All three `query()` call sites (interactive, heartbeat, cron) go through the same `buildQueryOptions()` factory in `src/lib/query-config.ts`, so a new SDK option gets added once.
 
 See the [Claude Agent SDK docs](https://docs.anthropic.com/en/docs/agents/claude-code/sdk) for all available options.
 
@@ -414,17 +434,17 @@ hello-claw is not trying to compete on breadth or popularity. It was built aroun
 | | OpenClaw | NanoClaw | hello-claw |
 |---|---|---|---|
 | **SDK** | Pi agent framework (independent) | Claude Agent SDK | Claude Agent SDK |
-| **Model** | Multi-provider (15+), Opus default | SDK default (no override) | Opus 4.6, adaptive thinking, 1M context |
+| **Model** | Multi-provider (15+), Opus default | SDK default (no override) | Sonnet default (Opus configurable), adaptive thinking, tiered heartbeat, curator sub-agents |
 | **Channels** | 15+ (WhatsApp, Telegram, Slack, Discord, Signal, iMessage, Teams…) | WhatsApp | Slack (single DM) |
 | **Tools** | 64 tool files + 51 skills + 36 extensions | 6 MCP tools + browser skill | 11 MCP servers (30+ tools) — slack, cron, media, search, brain, github, oracle, voice, audio, firecrawl, browser |
 | **Security** | Docker isolation (optional), no secret stripping, no network allowlist | Apple Container VMs, env sanitization, no network restriction, no audit log | Seatbelt sandbox + `allowedDomains` proxy + secret stripping + PreToolUse policy + CLAUDE.md integrity + JSONL audit |
-| **SDK depth** | Not used | Deep (query, sessions, hooks, env, agent teams) | Deep (query, sessions, hooks, plugins, allowedTools, allowedDomains, maxBudgetUsd) |
+| **SDK depth** | Not used | Deep (query, sessions, hooks, env, agent teams) | Deep (query, sessions, hooks, plugins, agents, allowedTools, allowedDomains, maxBudgetUsd, effort) |
 | **Codebase** | ~527K LOC, 10K+ commits | ~4K LOC, ~200 commits | ~3K LOC |
 | **Approval workflow** | None | None | Emoji reaction-based (cron + GitHub writes) |
 
 **Where hello-claw differs:**
 
-- **Max intelligence by default.** Opus 4.6 with adaptive thinking and 1M context — the agent gets the best reasoning the SDK can provide on every turn. OpenClaw supports multiple providers but delegates model config to its own Pi framework. NanoClaw passes no model or thinking parameters at all.
+- **Intelligence is a dial.** Sonnet + `effort: high` out of the box keeps the OSS-checkout bill low; `AGENT_MODEL=claude-opus-4-6` and `AGENT_EFFORT=max` are one `.env` line away when you want the best the SDK can provide. Tiered heartbeat routes the flagship model to the beats that matter (wakeup, wind-down) and a cheaper model to the ones that don't. Curator sub-agents absorb noisy work in isolated Sonnet contexts so the main session stays on the expensive model but lean. OpenClaw delegates model config to its own Pi framework. NanoClaw passes no model or thinking parameters at all.
 - **Security in depth.** The only project that layers OS sandbox + network domain allowlist + secret stripping from `process.env` + PreToolUse hook blocking + CLAUDE.md tamper detection + per-tool JSONL audit logging. OpenClaw has no sandbox by default and no secret stripping. NanoClaw has strong container isolation but no network restriction or audit trail.
 - **SDK-native.** Built directly on `query()` with hooks, plugins, sessions, `allowedDomains`, and `allowedTools` — using the Anthropic Agent SDK as designed rather than wrapping a separate framework. OpenClaw doesn't use the SDK at all.
 - **Useful tool diversity.** Eleven purpose-built MCP servers covering messaging, scheduling, image generation, web research, cognitive support, GitHub issues, cross-model oracle, voice synthesis, audio transcription, web scraping, and browser automation — each with a behavioral skill that teaches the agent when and how to use it.

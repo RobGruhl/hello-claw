@@ -27,7 +27,7 @@ All tools are prefixed `mcp__slack__`.
 
 Primary communication tool. Sends a message to the current channel.
 
-- `text` (required) — message content in Slack mrkdwn format (see `references/mrkdwn.md`)
+- `text` (required) — message content in Slack mrkdwn format (syntax rules are in the system prompt)
 - `thread_ts` (optional) — reply within an existing thread
 - Returns: timestamp `[ts: {ts} | {friendly time}]` — save this for threading and reactions
 - 4000 character limit per message. For longer content, split at logical breakpoints across multiple calls.
@@ -109,4 +109,3 @@ List Slack channels the bot has been added to.
 - Thread long conversations to keep the channel clean
 - When uploading files, always include an `initial_comment` explaining what it is
 - Respond in the user's channel context — don't reference internal mechanics
-- For Slack formatting details, see `references/mrkdwn.md`

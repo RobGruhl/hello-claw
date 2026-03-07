@@ -7,78 +7,98 @@ Walk the user through configuring hello-claw's cost controls and model settings.
 ### 1. Read current configuration
 
 Read the `.env` file in the project root (if it exists) and extract current values for:
-- `MAX_DAILY_BUDGET_USD` (default: 5)
+- `MAX_DAILY_BUDGET_USD` (default: 3)
 - `MAX_SESSION_BUDGET_USD` (default: 50)
-- `ENABLE_1M_CONTEXT` (default: false)
-- `HEARTBEAT_MODE` (default: conservative)
-- `AGENT_MODEL` (default: claude-opus-4-6)
+- `HEARTBEAT_MODE` (default: off)
+- `AGENT_MODEL` (default: claude-sonnet-4-6)
+- `AGENT_EFFORT` (default: high)
+- `CRON_MODEL` (default: same as AGENT_MODEL)
+- `AGENT_TIMEZONE` (default: America/Los_Angeles)
 - `FIRECRAWL_API_KEY` (present or not)
 
 Display a summary table showing each setting, its current value (or "default" if unset), and the default.
 
 ### 2. Explain each setting
 
-Walk through each setting with cost implications:
-
 **Daily Budget (`MAX_DAILY_BUDGET_USD`)**
 - Controls when the agent auto-pauses to prevent runaway spending
-- Default $5/day is conservative — a typical interactive session costs $0.50-2.00
-- Heartbeats add $0.10-0.30 each depending on what the agent does
+- Default $3/day is frugal — a typical Sonnet session costs $0.10–1.00
+- Heartbeats (if enabled) add roughly $0.10–0.40 each depending on tier
 - The agent posts a warning at 50% and auto-pauses at 100%
+- If you run Opus with heartbeats on, you'll want this higher — $15–20 is reasonable
 
 **Session Budget (`MAX_SESSION_BUDGET_USD`)**
-- SDK-level cap on a single query() call
-- Default $50 is generous — most sessions use $1-5
-- This is a safety net, not a daily control
-
-**1M Context (`ENABLE_1M_CONTEXT`)**
-- Enables the `context-1m-2025-08-07` beta for 1M token context window
-- Doubles per-token pricing (2x surcharge)
-- Only needed for very long sessions or large codebases
-- Recommended: leave disabled unless you have a specific need
+- SDK-level cap on a single `query()` call
+- Default $50 is a safety net, not a daily control — most sessions use under $2
+- If a session hits this, the SDK kills it mid-response
 
 **Heartbeat Mode (`HEARTBEAT_MODE`)**
-- `conservative` (default): 4 beats/day at 8:00, 12:00, 18:00, 22:00 PT
-- `standard`: 8 beats/day (original schedule)
-- `off`: no autonomous check-ins at all
-- Each heartbeat costs $0.10-0.30 depending on what the agent does
-- Conservative = ~$0.40-1.20/day in heartbeat costs
+- `off` (default) — no autonomous check-ins. The agent only responds when spoken to.
+- `conservative` — 4 beats/day: 8am (flagship), noon + 6pm (economy), 10pm (flagship)
+- `standard` — 8 beats/day: 7am flagship, four midday economy beats, then a 10/10:30/11pm flagship wind-down trilogy
+- Tiers: flagship beats run `AGENT_MODEL` at `AGENT_EFFORT`, economy beats run Sonnet at medium effort with 15-turn cap
+- The heartbeat is what makes the agent a presence rather than a chatbot — but it costs money. Start with `off`, turn it on once you've built trust.
 
 **Model (`AGENT_MODEL`)**
-- Default: `claude-opus-4-6` (most capable)
-- Can be changed to other Claude models if desired
-- Opus provides the best reasoning for autonomous agent tasks
+- Default `claude-sonnet-4-6` — good reasoning, one-fifth the cost of Opus
+- Set `claude-opus-4-6` for the best reasoning the SDK can provide
+- This is the primary model: interactive sessions + flagship heartbeat tier
+- Economy heartbeat tier is always Sonnet regardless of this setting
+
+**Effort (`AGENT_EFFORT`)**
+- `low` | `medium` | `high` (default) | `max`
+- Controls thinking depth. Higher effort means more output tokens and faster context growth.
+- `high` is a good balance. `max` is for when you really need the agent to chew on something.
+- Economy heartbeat tier always runs at `medium` regardless of this setting.
+
+**Cron Model (`CRON_MODEL`)**
+- Defaults to whatever `AGENT_MODEL` is
+- Independent dial for scheduled tasks — a cron job that pulls a daily summary probably doesn't need Opus
+- Set `claude-sonnet-4-6` or `claude-haiku-4-5-20251001` if your cron tasks are routine
+
+**Timezone (`AGENT_TIMEZONE`)**
+- IANA timezone string (e.g., `America/New_York`, `Europe/London`, `Asia/Tokyo`)
+- Affects all agent-facing timestamps, cron schedules, and the 4am daily reset boundary
+- Default `America/Los_Angeles` — change if you live somewhere else
 
 **Firecrawl API Key (`FIRECRAWL_API_KEY`)**
-- Optional — enables web scraping via Firecrawl API
+- Optional — enables structured web scraping
 - Without it, the agent falls back to WebFetch and browser tools
 - Get a key at firecrawl.dev
 
-### 3. Recommend settings for first-time users
+### 3. Profiles
 
-For first-time users, recommend:
-```
-MAX_DAILY_BUDGET_USD=5          # Safe daily limit
-MAX_SESSION_BUDGET_USD=50       # Generous session cap
-HEARTBEAT_MODE=conservative     # 4 check-ins/day
-ENABLE_1M_CONTEXT=false         # Standard pricing
-AGENT_MODEL=claude-opus-4-6    # Best model
-```
+Offer two reference configurations:
 
-These are the defaults — if none of these env vars are set, you get these values automatically.
+**Frugal (the defaults):**
+```
+# Leave all unset — these are the defaults
+# Sonnet, effort: high, heartbeat off, $3/day cap
+```
+Approximate idle cost: $0/day. Approximate light-use cost: under $1/day.
+
+**Full presence (what the project was designed around):**
+```
+AGENT_MODEL=claude-opus-4-6
+AGENT_EFFORT=high
+HEARTBEAT_MODE=standard
+MAX_DAILY_BUDGET_USD=20
+```
+Approximate cost: $5–15/day depending on interactive volume.
 
 ### 4. Ask for preferences
 
-Ask the user if they want to change any settings. Common adjustments:
-- Increase daily budget for heavy use days
-- Set heartbeat to `off` during development/testing
-- Enable 1M context for specific use cases
+Common adjustments:
+- Turn on heartbeat once the agent has a filled-out SOUL.md and knows who it is
+- Raise daily budget for heavy-use days, lower it when you're away
+- Change timezone if you're not on the US west coast
+- Set `CRON_MODEL=claude-haiku-4-5-20251001` if you have routine scheduled tasks
 
 ### 5. Apply changes
 
 If running locally, offer to update the `.env` file directly.
 
-If deploying to a remote Mac Mini, show the values to set in `~/hello-claw/.env` on the Mini:
+If deploying to a remote Mac Mini:
 ```bash
 ssh $MINI_HOST 'cat ~/hello-claw/.env'  # check current
 # Edit and restart:
@@ -87,4 +107,4 @@ ssh $MINI_HOST 'launchctl stop com.hello-claw.agent'
 ssh $MINI_HOST 'launchctl start com.hello-claw.agent'
 ```
 
-Remind: after changing cost config, a service restart picks up new values (no session clear needed — these are read at process startup, not baked into sessions).
+These settings are read at process startup, not baked into sessions — no session clear needed after changing them.

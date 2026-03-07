@@ -6,18 +6,14 @@
  * restarts are infrequent and the limit is generous.
  */
 
-const PACIFIC_TZ = 'America/Los_Angeles';
+import { todayInTz } from './timezone.js';
 
 interface BucketState {
   count: number;
-  date: string; // YYYY-MM-DD in Pacific time
+  date: string; // YYYY-MM-DD in agent timezone
 }
 
 const buckets = new Map<string, BucketState>();
-
-function todayPacific(): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: PACIFIC_TZ }); // YYYY-MM-DD
-}
 
 /**
  * Check if a tool call is within its daily rate limit.
@@ -27,7 +23,7 @@ export function checkRateLimit(
   toolCategory: string,
   dailyLimit: number,
 ): { allowed: true } | { allowed: false; message: string } {
-  const today = todayPacific();
+  const today = todayInTz();
   const bucket = buckets.get(toolCategory);
 
   if (!bucket || bucket.date !== today) {
@@ -39,7 +35,7 @@ export function checkRateLimit(
   if (bucket.count >= dailyLimit) {
     return {
       allowed: false,
-      message: `Daily rate limit reached for ${toolCategory}: ${dailyLimit} calls per day. Resets at midnight Pacific.`,
+      message: `Daily rate limit reached for ${toolCategory}: ${dailyLimit} calls per day. Resets at midnight (agent timezone).`,
     };
   }
 

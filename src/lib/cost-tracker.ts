@@ -3,11 +3,12 @@
  *
  * Tracks per-query costs from SDK's total_cost_usd, accumulates daily totals,
  * and persists to data/costs/daily.json + data/costs/costs.jsonl.
- * Day boundary is 4:00 AM Pacific Time.
+ * Day boundary is 4am in AGENT_TIMEZONE — see timezone.ts agentDay().
  */
 
 import fs from 'fs';
 import path from 'path';
+import { agentDay } from './timezone.js';
 
 const COSTS_DIR = path.resolve('data/costs');
 const DAILY_FILE = path.join(COSTS_DIR, 'daily.json');
@@ -26,7 +27,7 @@ interface CostEntry {
 }
 
 interface DailyState {
-  date: string; // YYYY-MM-DD in Pacific time (day boundary = 4am PT)
+  date: string; // YYYY-MM-DD from agentDay() — 4am boundary in AGENT_TIMEZONE
   totalUsd: number;
   entries: number;
 }
@@ -35,31 +36,12 @@ function ensureDir(): void {
   fs.mkdirSync(COSTS_DIR, { recursive: true });
 }
 
-/** Get the "cost day" date string (4am PT boundary). */
-function getCostDay(): string {
-  const now = new Date();
-  // Get current Pacific time components
-  const ptStr = now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
-  const ptDate = new Date(ptStr);
-  const ptHour = ptDate.getHours();
-
-  // Before 4am PT → still "yesterday"
-  if (ptHour < 4) {
-    ptDate.setDate(ptDate.getDate() - 1);
-  }
-
-  const y = ptDate.getFullYear();
-  const m = String(ptDate.getMonth() + 1).padStart(2, '0');
-  const d = String(ptDate.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
 function loadDaily(): DailyState {
   try {
     const raw = fs.readFileSync(DAILY_FILE, 'utf-8');
     return JSON.parse(raw) as DailyState;
   } catch {
-    return { date: getCostDay(), totalUsd: 0, entries: 0 };
+    return { date: agentDay(), totalUsd: 0, entries: 0 };
   }
 }
 
@@ -77,7 +59,7 @@ function appendJsonl(entry: CostEntry): void {
 
 /** Reset daily accumulator if the cost day has changed. */
 function resetDailyCostIfNewDay(state: DailyState): DailyState {
-  const today = getCostDay();
+  const today = agentDay();
   if (state.date !== today) {
     return { date: today, totalUsd: 0, entries: 0 };
   }

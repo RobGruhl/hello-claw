@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import type { App } from '@slack/bolt';
 import { markdownToMrkdwn } from '../lib/mrkdwn.js';
+import { friendlyTimestamp } from '../lib/timezone.js';
 
 interface SlackMcpOptions {
   app: App;
@@ -36,11 +37,7 @@ export function createSlackMcp({ app, channelId, workspaceDir }: SlackMcpOptions
               ...(args.thread_ts ? { thread_ts: args.thread_ts } : {}),
             });
             const ts = response.ts || '';
-            const friendly = ts ? new Date(parseFloat(ts) * 1000).toLocaleString('en-US', {
-              timeZone: 'America/Los_Angeles',
-              weekday: 'short', month: 'short', day: 'numeric',
-              hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
-            }) : '';
+            const friendly = ts ? friendlyTimestamp(ts) : '';
             return {
               content: [{ type: 'text' as const, text: `Message sent to ${channelId} [ts: ${ts} | ${friendly}]` }],
             };

@@ -6,37 +6,54 @@
 import fs from 'fs';
 import path from 'path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { AGENT_MODEL, BETAS, MAX_BUDGET_USD, MAX_DAILY_BUDGET_USD, HEARTBEAT_MODE } from './config.js';
+import { AGENT_MODEL, AGENT_EFFORT, MAX_DAILY_BUDGET_USD, HEARTBEAT_MODE } from './config.js';
 import { acquireChannelLock } from './channel-lock.js';
-import { buildSystemPrompt } from './system-prompt.js';
-import { createToolPolicy } from '../hooks/tool-policy.js';
-import { createAuditHook } from '../hooks/audit.js';
+import { buildQueryOptions } from './query-config.js';
 import { snapshotClaudeMd, checkClaudeMdIntegrity } from './integrity.js';
 import { isPaused, setPaused } from './pause.js';
 import { recordCost, formatCostSummary } from './cost-tracker.js';
+import { nowInTz, friendlyTimestamp } from './timezone.js';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 
-// Heartbeat schedule presets (Pacific Time)
-const SCHEDULES: Record<string, { hour: number; minute: number }[]> = {
+/**
+ * Heartbeat tiers — time-aware model routing.
+ *
+ * flagship: AGENT_MODEL at full effort. Used for the wakeup beat (fresh
+ *   perspective on the day) and the wind-down beats (reflecting on what
+ *   happened, consolidating memory). These are the beats where quality
+ *   matters.
+ * economy:  Sonnet at medium effort, capped turns. Midday check-ins are
+ *   mostly "anything urgent? no? ok" — don't need Opus for that.
+ */
+type Tier = 'flagship' | 'economy';
+
+interface Beat { hour: number; minute: number; tier: Tier }
+
+const TIER_CONFIG: Record<Tier, { model: string; effort: 'low' | 'medium' | 'high' | 'max'; maxTurns: number }> = {
+  flagship: { model: AGENT_MODEL,         effort: AGENT_EFFORT, maxTurns: 50 },
+  economy:  { model: 'claude-sonnet-4-6', effort: 'medium',     maxTurns: 15 },
+};
+
+const SCHEDULES: Record<string, Beat[]> = {
   conservative: [
-    { hour: 8, minute: 0 },   // Morning
-    { hour: 12, minute: 0 },  // Midday
-    { hour: 18, minute: 0 },  // Evening
-    { hour: 22, minute: 0 },  // Night
+    { hour: 8,  minute: 0,  tier: 'flagship' },  // wakeup — fresh take on the day
+    { hour: 12, minute: 0,  tier: 'economy'  },
+    { hour: 18, minute: 0,  tier: 'economy'  },
+    { hour: 22, minute: 0,  tier: 'flagship' },  // wind-down — reflect
   ],
   standard: [
-    { hour: 7, minute: 0 },   // Morning check-in
-    { hour: 10, minute: 0 },  // Mid-morning
-    { hour: 13, minute: 0 },  // After lunch
-    { hour: 16, minute: 0 },  // Afternoon
-    { hour: 19, minute: 0 },  // Evening
-    { hour: 22, minute: 0 },  // Wind-down start
-    { hour: 22, minute: 30 }, // Wind-down middle
-    { hour: 23, minute: 0 },  // Wind-down end / go to bed
+    { hour: 7,  minute: 0,  tier: 'flagship' },  // wakeup
+    { hour: 10, minute: 0,  tier: 'economy'  },
+    { hour: 13, minute: 0,  tier: 'economy'  },
+    { hour: 16, minute: 0,  tier: 'economy'  },
+    { hour: 19, minute: 0,  tier: 'economy'  },
+    { hour: 22, minute: 0,  tier: 'flagship' },  // last three: wind-down trilogy
+    { hour: 22, minute: 30, tier: 'flagship' },  //   reflect on the day,
+    { hour: 23, minute: 0,  tier: 'flagship' },  //   consolidate, go to bed
   ],
 };
 
-const HEARTBEAT_SCHEDULE = SCHEDULES[HEARTBEAT_MODE] || SCHEDULES.conservative;
+const HEARTBEAT_SCHEDULE: Beat[] = SCHEDULES[HEARTBEAT_MODE] || SCHEDULES.conservative;
 
 let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -47,20 +64,6 @@ interface HeartbeatOptions {
   channelId: string;
   userName?: string;
   mcpServers?: Record<string, unknown>;
-}
-
-/** Get current Pacific time components. */
-function getPacificTime(): { hour: number; minute: number } {
-  const now = new Date();
-  const ptHour = parseInt(
-    now.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/Los_Angeles' }),
-    10,
-  );
-  const ptMin = parseInt(
-    now.toLocaleString('en-US', { minute: 'numeric', timeZone: 'America/Los_Angeles' }),
-    10,
-  );
-  return { hour: ptHour, minute: ptMin };
 }
 
 export function isHeartbeatContentEffectivelyEmpty(content: string): boolean {
@@ -90,9 +93,9 @@ function createHeartbeatFilter(): HookCallback {
 }
 
 /** Calculate ms until the next scheduled beat. Returns { delayMs, beat }. */
-function msUntilNextScheduledBeat(): { delayMs: number; beat: { hour: number; minute: number } } {
-  const { hour: ptHour, minute: ptMin } = getPacificTime();
-  const nowTotalMin = ptHour * 60 + ptMin;
+function msUntilNextScheduledBeat(): { delayMs: number; beat: Beat } {
+  const { hour, minute } = nowInTz();
+  const nowTotalMin = hour * 60 + minute;
 
   // Find the next beat after current time
   for (const beat of HEARTBEAT_SCHEDULE) {
@@ -119,15 +122,15 @@ function msUntilNextScheduledBeat(): { delayMs: number; beat: { hour: number; mi
   return { delayMs: Math.max(delayMs, 1000), beat: firstBeat };
 }
 
-async function runHeartbeat(opts: HeartbeatOptions): Promise<void> {
-  console.log(`[heartbeat] Tick at ${new Date().toISOString()}`);
+async function runHeartbeat(opts: HeartbeatOptions, beat: Beat): Promise<void> {
+  const tier = TIER_CONFIG[beat.tier];
+  console.log(`[heartbeat] Tick at ${new Date().toISOString()} — ${beat.tier} (${tier.model}, effort=${tier.effort})`);
 
   if (isPaused()) {
     console.log('[heartbeat] Skipping — agent is paused');
     return;
   }
 
-  // Check HEARTBEAT.md exists (agent can read it from disk if needed)
   const heartbeatMd = path.join(opts.workDir, 'HEARTBEAT.md');
   if (!fs.existsSync(heartbeatMd)) {
     console.log('[heartbeat] Skipping — no HEARTBEAT.md');
@@ -145,85 +148,53 @@ async function runHeartbeat(opts: HeartbeatOptions): Promise<void> {
     // maps ranges to behavioral suggestions (curiosity, reflection, playful, quiet, etc.)
     // so periodic check-ins feel varied rather than repetitive.
     const whim = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
-
-    // Compute wind-down status from Pacific time (10pm+ beats)
-    const { hour: ptHour, minute: ptMin } = getPacificTime();
-    const isWindDown = ptHour >= 22;
+    const isWindDown = beat.hour >= 22;
 
     const nowTs = (Date.now() / 1000).toFixed(6);
-    const friendly = new Date(parseFloat(nowTs) * 1000).toLocaleString('en-US', {
-      timeZone: 'America/Los_Angeles', weekday: 'short', month: 'short', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short',
-    });
 
     const prompt = `[SCHEDULED HEARTBEAT — Running automatically, not responding to ${name}. Use mcp__slack__send_message only if you have something substantive to share.]
 
 Whim: ${whim}
 Wind-down: ${isWindDown}
+Tier: ${beat.tier}
 Use get_channel_history to check recent activity before deciding.
 Full protocol in HEARTBEAT.md if needed.
 
-[ts: ${nowTs} | ${friendly}]`;
+[ts: ${nowTs} | ${friendlyTimestamp(nowTs)}]`;
 
-    let result: string | null = null;
     let totalCostUsd = 0;
     let numTurns = 0;
 
-    // Ephemeral session — always fresh, never resumed or stored.
-    // Each heartbeat starts clean; files provide continuity, not conversation history.
+    // Ephemeral — always fresh, never resumed or stored. Files (MEMORY.md,
+    // daily-logs/) provide continuity, not conversation history.
     for await (const msg of query({
       prompt,
-      options: {
-        model: AGENT_MODEL,
-        thinking: { type: 'adaptive' },
-        effort: 'max',
-        betas: ['code-execution-web-tools-2026-02-09' as any, ...BETAS],
-        maxBudgetUsd: MAX_BUDGET_USD,
-        maxTurns: 50,
-        systemPrompt: buildSystemPrompt(opts.workDir, opts.userName),
-        cwd: opts.workDir,
-        resume: undefined,
-        env: { ...process.env, ANTHROPIC_API_KEY: opts.anthropicApiKey, ENABLE_TOOL_SEARCH: 'false' },
-        plugins: [{ type: 'local' as const, path: path.resolve('plugins') }],
+      options: buildQueryOptions({
+        workDir: opts.workDir,
+        channelId: opts.channelId,
+        anthropicApiKey: opts.anthropicApiKey,
+        userName: opts.userName,
+        sessionId: undefined,
+        model: tier.model,
+        effort: tier.effort,
+        maxTurns: tier.maxTurns,
         allowedTools: [
-          'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
+          'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Task',
           'WebSearch', 'WebFetch',
           'mcp__slack__*', 'mcp__media__*', 'mcp__search__*',
           'mcp__second-brain__*',
           'mcp__audio__*',
         ],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project'],
-        sandbox: {
-          enabled: true,
-          autoAllowBashIfSandboxed: true,
-          allowUnsandboxedCommands: false,
-          network: {
-            allowLocalBinding: false,
-            allowedDomains: [
-              'api.anthropic.com',
-              'statsig.anthropic.com',
-              'sentry.io',
-            ],
-          },
-        },
-        mcpServers: opts.mcpServers as any,
-        hooks: {
-          PreToolUse: [{ hooks: [createToolPolicy(opts.workDir, opts.channelId), createHeartbeatFilter()] }],
-          PostToolUse: [{ hooks: [createAuditHook(opts.channelId)] }],
-        },
-      },
+        mcpServers: opts.mcpServers || {},
+        extraPreHooks: [createHeartbeatFilter()],
+      }),
     })) {
       const sub = 'subtype' in msg ? ` subtype=${(msg as any).subtype}` : '';
       console.log(`[heartbeat:sdk] type=${msg.type}${sub}`);
       if (msg.type === 'result') {
-        const resultMsg = msg as any;
-        totalCostUsd = resultMsg.total_cost_usd || 0;
-        numTurns = resultMsg.num_turns || 0;
-        if ('result' in resultMsg && resultMsg.result) {
-          result = resultMsg.result as string;
-        }
+        const r = msg as any;
+        totalCostUsd = r.total_cost_usd || 0;
+        numTurns = r.num_turns || 0;
       }
     }
 
@@ -272,9 +243,6 @@ Full protocol in HEARTBEAT.md if needed.
       }
     }
 
-    if (result) {
-      console.log(`[heartbeat] query() returned ${result.length} chars (discarded — agent must use send_message)`);
-    }
   } catch (err) {
     console.error(`[heartbeat] Error:`, err);
   } finally {
@@ -284,11 +252,15 @@ Full protocol in HEARTBEAT.md if needed.
 
 function scheduleNextTick(opts: HeartbeatOptions): void {
   const { delayMs, beat } = msUntilNextScheduledBeat();
-  const beatTime = `${beat.hour}:${String(beat.minute).padStart(2, '0')} PT`;
-  console.log(`[heartbeat] Next beat: ${beatTime} (in ${Math.round(delayMs / 1000)}s)`);
-  timer = setTimeout(() => {
-    runHeartbeat(opts);
-    scheduleNextTick(opts); // re-align each time — eliminates drift
+  const beatTime = `${beat.hour}:${String(beat.minute).padStart(2, '0')}`;
+  console.log(`[heartbeat] Next beat: ${beatTime} ${beat.tier} (in ${Math.round(delayMs / 1000)}s)`);
+  timer = setTimeout(async () => {
+    // Await the beat before scheduling the next one — otherwise a slow beat
+    // (oracle call, deep research) could overlap with the next tick.
+    // msUntilNextScheduledBeat re-reads the clock after the beat finishes,
+    // so we self-correct for however long the beat took.
+    await runHeartbeat(opts, beat);
+    scheduleNextTick(opts);
   }, delayMs);
 }
 
@@ -300,8 +272,8 @@ export function startHeartbeat(opts: HeartbeatOptions): void {
     return;
   }
 
-  const times = HEARTBEAT_SCHEDULE.map(b => `${b.hour}:${String(b.minute).padStart(2, '0')}`).join(', ');
-  console.log(`[heartbeat] Starting — ${HEARTBEAT_MODE} schedule: ${times} PT (${HEARTBEAT_SCHEDULE.length} beats/day)`);
+  const times = HEARTBEAT_SCHEDULE.map(b => `${b.hour}:${String(b.minute).padStart(2, '0')}${b.tier[0]}`).join(' ');
+  console.log(`[heartbeat] Starting — ${HEARTBEAT_MODE}: ${times} (${HEARTBEAT_SCHEDULE.length}/day, f=flagship e=economy)`);
 
   // Don't fire immediately — just schedule the next beat.
   // Firing on startup causes heartbeat spam during rapid deploys.
